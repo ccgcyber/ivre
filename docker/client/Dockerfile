@@ -18,15 +18,14 @@ FROM ivre/base
 MAINTAINER Pierre LALET <pierre.lalet@cea.fr>
 
 # Tools
-## non-free: s3270; backports: ffmpeg
+## non-free: s3270
 RUN sed -i 's/ main/ main non-free/' /etc/apt/sources.list
-RUN echo deb http://httpredir.debian.org/debian stable-backports main contrib non-free >> /etc/apt/sources.list
 RUN apt-get -q update
 ## openssl: IVRE depends on openssl exec + libssl needed for Nmap
 ## libfreetype6 libfontconfig1 fonts-dejavu: screenshots w/ phantomjs
 RUN apt-get -qy install p0f rsync screen ipython openssl tesseract-ocr \
     libfreetype6 libfontconfig1 fonts-dejavu imagemagick ffmpeg s3270 \
-    patch bash-completion bzip2
+    patch bash-completion bzip2 bro
 
 # Install Nmap. Use included libpcap because to use the workaround for
 # Nmap issue #34 (https://github.com/nmap/nmap/issues/34) since we do
@@ -64,15 +63,5 @@ RUN for d in /usr /usr/local; do \
 	) \
     done; true
 RUN nmap --script-update
-
-# Install bro
-ADD https://www.bro.org/downloads/release/bro-2.4.1.tar.gz ./bro.tar.gz
-RUN apt-get -qy install build-essential cmake libssl-dev libpcap-dev \
-                        flex bison libpython2.7-dev swig && \
-    cd tmp/ && tar zxf ../bro.tar.gz && mv bro-* bro && \
-    cd bro && ./configure && make -j 4 && make install && \
-    cd / && rm -rf tmp/bro bro.tar.gz && \
-    apt-get -qy --purge autoremove build-essential cmake libssl-dev \
-                        libpcap-dev flex bison libpython2.7-dev swig
 
 RUN mkdir /var/lib/ivre

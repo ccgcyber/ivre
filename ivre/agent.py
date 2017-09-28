@@ -49,6 +49,7 @@ INDIR=./input/
 CURDIR=./cur/
 OUTDIR=./output/
 ERRORDIR=./error/
+DATADIR=./data/
 
 filter () {
     %(filter)s
@@ -56,6 +57,30 @@ filter () {
 
 scan () {
     %(scan)s -iL - -oX -
+}
+
+_get_screenshots () {
+    fname="$1"
+    bzgrep -o 'output=\"Saved to [^\"]*\"' "$fname" | sed 's#^output="Saved to ##;s#"$##'
+}
+
+post_scan () {
+    fname="$1"
+
+    if [ "$STOREDOWN" = "true" ] || bzgrep -qF '<status state="up"' \\
+             "$CURDIR/$fname.xml.bz2"; then
+        # find screenshots
+        OIFS="$IFS"
+        IFS=$'\n'
+        set -- `_get_screenshots "$CURDIR/$fname.xml.bz2"`
+        IFS="$OIFS"
+        tar cf "$DATADIR/$fname.tar" "$@" 2>/dev/null
+        rm -f -- "$@"
+        mv "$CURDIR/$fname.xml.bz2" "$OUTDIR"
+    else
+        rm -f "$CURDIR/$fname.xml.bz2"
+    fi
+    rm -f "$CURDIR/$fname"
 }
 
 someone_alive () {
@@ -69,7 +94,7 @@ someone_alive () {
     return 1
 }
 
-mkdir -p "$INDIR" "$CURDIR" "$OUTDIR" "$ERRORDIR"
+mkdir -p "$INDIR" "$CURDIR" "$OUTDIR" "$ERRORDIR" "$DATADIR"
 
 # master
 if [ -z "$IVRE_WORKER" ]; then
@@ -77,7 +102,7 @@ if [ -z "$IVRE_WORKER" ]; then
 
     # clean children on exit
     trap "trap - TERM INT EXIT; echo '${master_prompt}shuting down' >&2;\\
-          kill -- -$$; exit" TERM INT EXIT
+          pkill -g 0; exit" TERM INT EXIT
 
     echo "${master_prompt}spawning $THREADS workers" >&2
     export IVRE_WORKER=1
@@ -120,13 +145,7 @@ while true; do
         $SLEEP
         echo "error with $fname" >&2
     else
-        if [ "$STOREDOWN" = "true" ] ||
-            bzgrep -q -F '<status state="up"' "$CURDIR/$fname.xml.bz2"; then
-            mv "$CURDIR/$fname.xml.bz2" "$OUTDIR"
-        else
-            rm -f "$CURDIR/$fname.xml.bz2"
-        fi
-        rm -f "$CURDIR/$fname"
+        post_scan "$fname"
         echo "done $fname" >&2
     fi
 done
