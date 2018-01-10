@@ -55,11 +55,8 @@ else:
 
 
 HTTPD_PORT = 18080
-try:
-    HTTPD_HOSTNAME = socket.gethostbyaddr('127.0.0.1')[0]
-except:
-    sys.stderr.write('Cannot guess domain name - using localhost')
-    HTTPD_HOSTNAME = 'localhost'
+HTTPD_HOSTNAME = socket.gethostname()
+
 
 # http://schinckel.net/2013/04/15/capture-and-test-sys.stdout-sys.stderr-in-unittest.testcase/
 @contextmanager
@@ -290,7 +287,8 @@ class IvreTests(unittest.TestCase):
                     pass
             for sig in [signal.SIGINT, signal.SIGTERM]:
                 signal.signal(sig, terminate)
-            proc = RUN_ITER(["ivre", "httpd", "-p", str(HTTPD_PORT)],
+            proc = RUN_ITER(["ivre", "httpd", "-p", str(HTTPD_PORT),
+                             "-b", HTTPD_HOSTNAME],
                             stdout=open(os.devnull, 'w'),
                             stderr=subprocess.STDOUT)
             proc.wait()
@@ -1246,6 +1244,21 @@ class IvreTests(unittest.TestCase):
         )
         self.assertEqual(count + new_count, total_count)
 
+        ret, out, _ = RUN(["ivre", "ipinfo", "--short"])
+        self.assertEqual(ret, 0)
+        count = sum(1 for _ in out.splitlines())
+        self.check_value("passive_ipinfo_short_count", count)
+
+        ret, out, _ = RUN(["ivre", "iphost", "/./"])
+        self.assertEqual(ret, 0)
+        count = sum(1 for _ in out.splitlines())
+        self.check_value("passive_iphost_count", count)
+
+        ret, out, _ = RUN(["ivre", "iphost", "--sub", "com"])
+        self.assertEqual(ret, 0)
+        count = sum(1 for _ in out.splitlines())
+        self.check_value("passive_iphost_count_com", count)
+
         self.assertEqual(RUN(["ivre", "ipinfo", "--init"],
                              stdin=open(os.devnull))[0], 0)
         # Clean
@@ -1516,6 +1529,29 @@ class IvreTests(unittest.TestCase):
             self.assertTrue(all(is_prime(x) for x in factors))
             self.assertEqual(reduce(lambda x, y: x * y, factors), nbr)
 
+        # Bro logs
+        basepath = os.getenv('BRO_SAMPLES')
+        badchars = re.compile('[%s]' % ''.join(
+            re.escape(char) for char in [os.path.sep, '-', '.']
+        ))
+        if basepath:
+            for dirname, _, fnames in os.walk(basepath):
+                for fname in fnames:
+                    if not fname.endswith('.log'):
+                        continue
+                    fname = os.path.join(dirname, fname)
+                    brofd = ivre.parser.bro.BroFile(fname)
+                    i = 0
+                    for i, record in enumerate(brofd):
+                        json.dumps(record, default=ivre.utils.serialize)
+                    self.check_value(
+                        'utils_bro_%s_count' % badchars.sub(
+                            '_',
+                            fname[len(basepath):-4].lstrip('/'),
+                        ),
+                        i + 1,
+                    )
+
     def test_scans(self):
         "Run scans, with and without agents"
 
@@ -1723,8 +1759,22 @@ class IvreTests(unittest.TestCase):
         for dirname in ['scans', 'tmp']:
             shutil.rmtree(dirname)
 
+    def test_conf(self):
+        # Ensure env var IVRE_CONF is taken into account
+        has_env_conf = "IVRE_CONF" in os.environ
+        if has_env_conf:
+            env_conf = os.environ["IVRE_CONF"]
+        else:
+            env_conf = __file__
+            os.environ["IVRE_CONF"] = env_conf
+        all_confs = list(ivre.config.get_config_file())
+        self.assertTrue(env_conf in all_confs,
+                        "Env conf %s should be in %s" % (env_conf, all_confs))
+        if not has_env_conf:
+            del os.environ["IVRE_CONF"]
 
-TESTS = set(["nmap", "passive", "data", "utils", "scans"])
+
+TESTS = set(["nmap", "passive", "data", "utils", "scans", "conf"])
 
 
 DATABASES = {
@@ -1803,9 +1853,10 @@ if __name__ == '__main__':
     parse_env()
     import ivre.config
     import ivre.db
-    import ivre.utils
     import ivre.mathutils
+    import ivre.parser.bro
     import ivre.passive
+    import ivre.utils
     if not ivre.config.DEBUG:
         sys.stderr.write("You *must* have the DEBUG config value set to "
                          "True to run the tests.\n")

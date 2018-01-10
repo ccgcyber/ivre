@@ -641,13 +641,6 @@ class PostgresDB(DB):
         return t
 
     @staticmethod
-    def convert_ip(addr):
-        try:
-            return utils.int2ip(addr)
-        except (TypeError, struct.error):
-            return addr
-
-    @staticmethod
     def flt_and(*args):
         return and_(*args)
 
@@ -1410,8 +1403,8 @@ insert structures.
                     archive=0,
                     merge=False,
                     **dict(
-                        (key, host[key]) for key in ['state', 'state_reason',
-                                                     'state_reason_ttl']
+                        (key, host.get(key)) for key in ['state', 'state_reason',
+                                                         'state_reason_ttl']
                         if key in host
                     )
                 )\
@@ -1457,7 +1450,7 @@ insert structures.
                                          time_stop=host['endtime'],
                                          state=host['state'],
                                          state_reason=host['state_reason'],
-                                         state_reason_ttl=host['state_reason_ttl'],
+                                         state_reason_ttl=host.get('state_reason_ttl'),
                                          archive=0,
                                          merge=False,
                                      )\
@@ -2893,8 +2886,8 @@ passive table."""
                                   if reverse else
                                   'domain'].has_key(name))
                 if subdomains else
-                (cls._searchstring_re(Passive.targetval
-                                      if reverse else Passive.value), name)
+                cls._searchstring_re(Passive.targetval
+                                     if reverse else Passive.value, name)
             )
         ))
 
