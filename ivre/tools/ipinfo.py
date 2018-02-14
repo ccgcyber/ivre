@@ -70,7 +70,12 @@ def disp_rec(rec):
         print("(%d time%s)" % (rec['count'], rec['count'] > 1 and 's' or ''), end=' ')
     if 'firstseen' in rec and 'lastseen' in rec:
         if isinstance(rec['firstseen'], datetime.datetime):
-            print(rec['firstseen'], '-', rec['lastseen'], end=' ')
+            print(
+                rec['firstseen'].replace(microsecond=0),
+                '-',
+                rec['lastseen'].replace(microsecond=0),
+                end=' '
+            )
         else:
             print(datetime.datetime.fromtimestamp(int(rec['firstseen'])), '-', end=' ')
             print(datetime.datetime.fromtimestamp(int(rec['lastseen'])), end=' ')
@@ -91,16 +96,13 @@ def disp_recs_std(flt):
     c = db.passive.get(flt, sort=[('addr', 1), ('recontype', 1), ('source', 1),
                                   ('port', 1)])
     for rec in c:
-        if not 'addr' in rec or rec['addr'] == 0:
+        if not 'addr' in rec or not rec['addr']:
             continue
         if oa != rec['addr']:
             if oa is not None:
                 print()
             oa = rec['addr']
-            try:
-                print(ivre.utils.int2ip(oa))
-            except (struct.error, TypeError):
-                print(oa)
+            print(db.passive.convert_ip(oa))
             c = db.data.infos_byip(oa)
             if c:
                 if 'country_code' in c:
@@ -145,7 +147,7 @@ def _disp_recs_tail(flt, field, n):
     recs.reverse()
     for r in recs:
         if 'addr' in r:
-            print(ivre.utils.int2ip(r['addr']), end=' ')
+            print(db.passive.convert_ip(r['addr']), end=' ')
         else:
             if 'fulltargetval' in r:
                 print(r['fulltargetval'], end=' ')
@@ -171,13 +173,14 @@ def _disp_recs_tailf(flt, field):
     r = {'firstseen': 0, 'lastseen': 0}
     for r in firstrecs:
         if 'addr' in r:
-            print(ivre.utils.int2ip(r['addr']), end=' ')
+            print(db.passive.convert_ip(r['addr']), end=' ')
         else:
             if 'fulltargetval' in r:
                 print(r['fulltargetval'], end=' ')
             else:
                 print(r['targetval'], end=' ')
         disp_rec(r)
+        sys.stdout.flush()
     # 2. loop
     try:
         while True:
@@ -185,16 +188,20 @@ def _disp_recs_tailf(flt, field):
             time.sleep(1)
             for r in db.passive.get(
                     db.passive.flt_and(
-                        baseflt, {field: {'$gt': prevtime}}),
+                        baseflt,
+                        db.passive.searchnewer(prevtime,
+                                               new=field=='lastseen'),
+                    ),
                     sort=[(field, 1)]):
                 if 'addr' in r:
-                    print(ivre.utils.int2ip(r['addr']), end=' ')
+                    print(db.passive.convert_ip(r['addr']), end=' ')
                 else:
                     if 'fulltargetval' in r:
                         print(r['fulltargetval'], end=' ')
                     else:
                         print(r['targetval'], end=' ')
                 disp_rec(r)
+                sys.stdout.flush()
     except KeyboardInterrupt:
         pass
 
@@ -408,6 +415,6 @@ def main():
             flt = db.passive.flt_and(flt, db.passive.searchnet(a))
         else:
             if a.isdigit():
-                a = ivre.utils.int2ip(int(a))
+                a = db.passive.convert_ip(int(a))
             flt = db.passive.flt_and(flt, db.passive.searchhost(a))
         disp_recs(flt)

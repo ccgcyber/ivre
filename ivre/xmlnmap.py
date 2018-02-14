@@ -107,6 +107,7 @@ ALIASES_TABLE_ELEMS = {
     "rdp-vuln-ms12-020": "vulns",
     "realvnc-auth-bypass": "vulns",
     "rmi-vuln-classloader": "vulns",
+    "rsa-vuln-roca": "vulns",
     "samba-vuln-cve-2012-1182": "vulns",
     "smb2-vuln-uptime": "vulns",
     "smb-double-pulsar-backdoor": "vulns",
@@ -769,16 +770,6 @@ MASSCAN_NMAP_SCRIPT_NMAP_PROBES = {
     },
 }
 
-NMAP_FINGERPRINT_IVRE_KEY = {
-    # TODO: cpe
-    'd': 'service_devicetype',
-    'h': 'service_hostname',
-    'i': 'service_extrainfo',
-    'o': 'service_ostype',
-    'p': 'service_product',
-    'v': 'service_version',
-}
-
 MASSCAN_SERVICES_NMAP_SERVICES = {
     "ftp": "ftp",
     "http": "http",
@@ -1098,7 +1089,7 @@ class NmapHandler(ContentHandler):
                 probes.extend(MASSCAN_NMAP_SCRIPT_NMAP_PROBES\
                               .get(self._curport['protocol'], {})\
                               .get(scriptid, []))
-                softmatch = {}
+                match = {}
                 for probe in probes:
                     # udp/ike: let's use ike-scan FP
                     if self._curport['protocol'] == 'udp' and \
@@ -1110,28 +1101,13 @@ class NmapHandler(ContentHandler):
                         if self._curport.get('service_name') == 'isakmp':
                             self._curport['scripts'][0]['masscan'] = masscan_data
                         return
-                    try:
-                        fingerprints = utils.get_nmap_svc_fp(
-                            proto=self._curport['protocol'],
-                            probe=probe,
-                        )['fp']
-                    except KeyError:
-                        pass
-                    else:
-                        for service, fingerprint in fingerprints:
-                            match = fingerprint['m'][0].search(raw_output)
-                            if match is not None:
-                                doc = softmatch if fingerprint['soft'] else self._curport
-                                doc['service_name'] = service
-                                for elt, key in viewitems(NMAP_FINGERPRINT_IVRE_KEY):
-                                    if elt in fingerprint:
-                                        doc[key] = utils.nmap_svc_fp_format_data(
-                                            fingerprint[elt][0], match
-                                        )
-                                if not fingerprint['soft']:
-                                    return
-                if softmatch:
-                    self._curport.update(softmatch)
+                    match = utils.match_nmap_svc_fp(
+                        output=raw_output,
+                        proto=self._curport['protocol'],
+                        probe=probe,
+                    )
+                if match:
+                    self._curport.update(match)
                 return
             for attr in attrs.keys():
                 self._curport['service_%s' % attr] = attrs[attr]
@@ -1520,9 +1496,8 @@ class Nmap2DB(NmapHandler):
             for func in [self._db.data.country_byip,
                          self._db.data.as_byip,
                          self._db.data.location_byip]:
-                data = func(self._curhost['addr'])
-                if data:
-                    self._curhost['infos'].update(data)
+                self._curhost['infos'].update(func(self._curhost['addr'])
+                                              or {})
         if self.source:
             self._curhost['source'] = self.source
         # We are about to insert data based on this file, so we want

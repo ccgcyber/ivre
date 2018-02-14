@@ -1014,7 +1014,8 @@ have no effect if it is not expected)."""
             {"$project": {"_id": 0, "coords": "$infos.loc.coordinates"}},
             {"$group": {"_id": "$coords", "count": {"$sum": 1}}},
         ]
-        return col.aggregate(pipeline, cursor={})
+        return ({'_id': tuple(rec['_id']), 'count': rec['count']}
+                for rec in col.aggregate(pipeline, cursor={}))
 
     def is_scan_present(self, scanid):
         for colname in [self.colname_scans, self.colname_oldscans]:
@@ -2939,6 +2940,14 @@ setting values according to the keyword arguments.
         now = datetime.datetime.now()
         now = int(now.strftime('%s')) + now.microsecond * 1e-6
         return {field: {'$lt' if neg else '$gte': now - delta}}
+
+    @staticmethod
+    def searchnewer(timestamp, neg=False, new=False):
+        field = 'lastseen' if new else 'firstseen'
+        if isinstance(timestamp, datetime.datetime):
+            timestamp = (int(timestamp.strftime('%s'))
+                         + timestamp.microsecond * 1e-6)
+        return {field: {'$lte' if neg else '$gt': timestamp}}
 
     def knownip_bycountry(self, code):
         return self.set_limits(self.find(

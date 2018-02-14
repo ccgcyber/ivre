@@ -31,6 +31,7 @@ import json
 import os
 import random
 import re
+from select import select
 import shutil
 import signal
 import socket
@@ -47,6 +48,7 @@ except ImportError:
 
 from builtins import int, range
 from future.utils import viewvalues
+from future.builtins import int
 from past.builtins import basestring
 if sys.version_info[:2] < (2, 7):
     import unittest2 as unittest
@@ -999,6 +1001,17 @@ class IvreTests(unittest.TestCase):
             "nmap_tophop_10+",
             next(ivre.db.db.nmap.topvalues("hop>10"))['_id'])
 
+        locations = list(ivre.db.db.nmap.getlocations(
+            ivre.db.db.nmap.flt_empty
+        ))
+        self.assertTrue(all(len(elt) == 2 for elt in locations))
+        self.assertTrue(all(isinstance(elt['_id'], tuple) for elt in locations))
+        self.assertTrue(all(len(elt['_id']) == 2 for elt in locations))
+        self.assertTrue(all(all(isinstance(sub, float) for sub in elt['_id'])
+                            for elt in locations))
+        self.assertTrue(all(isinstance(elt['count'], int) for elt in locations))
+        self.check_value('nmap_location_count', len(locations))
+
         if DATABASE != "postgres":
             # FIXME: for some reason, this does not terminate
             self.assertEqual(RUN(["ivre", "scancli", "--init"],
@@ -1258,6 +1271,53 @@ class IvreTests(unittest.TestCase):
         self.assertEqual(ret, 0)
         count = sum(1 for _ in out.splitlines())
         self.check_value("passive_iphost_count_com", count)
+
+        for tail in ["tail", "tailnew"]:
+            ret, out, _ = RUN(["ivre", "ipinfo", "--%s" % tail, "1"])
+            self.assertEqual(len(out.splitlines()), 1)
+            self.assertEqual(ret, 0)
+
+        def alarm_handler(signum, stacktrace):
+            assert signum == signal.SIGALRM
+            raise Exception("Alarm")
+
+        old_handler = signal.signal(signal.SIGALRM, alarm_handler)
+
+        for tail in ["tailf", "tailfnew"]:
+            proc = RUN_ITER(['ivre', 'ipinfo', '--%s' % tail],
+                            stderr=None)
+            out = []
+            old_alarm = signal.alarm(30)
+            # "for i, line in enumerate(proc.stdout)" won't work.
+            # See https://stackoverflow.com/a/26761671
+            for line in iter(proc.stdout.readline, b""):
+                if line[:1] == b'\t':
+                    continue
+                out.append(line)
+                if len(out) == 10:
+                    break
+            signal.alarm(20)
+            self.assertEqual(len(out), 10)
+            self.assertFalse(select([proc.stdout], [], [], 10)[0])
+            #proc.send_signal(signal.SIGINT)
+            #ret = proc.wait()
+            #self.assertEqual(ret, 0)
+            # XXX Travis CI seems broken here
+            proc.kill()
+            proc.wait()
+            signal.alarm(old_alarm)
+        
+        signal.signal(signal.SIGALRM, old_handler)
+
+        if DATABASE == "mongo":
+            # Check no None value can actually exist in DB
+            self.assertFalse(None in (
+                rec['source'] for rec in ivre.db.db.passive.get(
+                    ivre.db.db.passive.flt_empty,
+                    fields=['source'],
+                )
+                if 'source' in rec
+            ))
 
         self.assertEqual(RUN(["ivre", "ipinfo", "--init"],
                              stdin=open(os.devnull))[0], 0)
