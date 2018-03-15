@@ -1,4 +1,4 @@
-sudo: false
+sudo: required
 dist: trusty
 
 env:
@@ -18,6 +18,8 @@ env:
   - DB=mongo MONGODB_VERSION=3.7.1
 
 language: python
+
+cache: pip
 
 python:
   - 2.6
@@ -73,8 +75,9 @@ before_script:
   # get samples
   - mkdir tests/samples
   - cp tests/results-public-samples tests/samples/results
-  ## Nmap Internet-wide Modbus scan (JSON format)
-  - wget  --no-check-certificate -O tests/samples/Nmap-Modbus-IPv4.json.bz2 https://ivre.rocks/data/Nmap-Modbus-IPv4.json.bz2 # JSON files w/ Nmap scan results
+  - cp tests/iptables-samples tests/samples/iptables.log
+  ## Nmap Internet-wide Modbus scan (JSON format, shortened)
+  - wget  --no-check-certificate -O tests/samples/Nmap-Modbus-IPv4.json.bz2 https://ivre.rocks/data/tests/Nmap-Modbus-IPv4-partial.json.bz2 # JSON files w/ Nmap scan results
   ## Masscan sample scans (XML format)
   - for file in test-probe-ike-ipsec-nat-t-probe-U4500.xml.bz2 test-probe-ike-probe-U500.xml.bz2 test-T22.xml.bz2 ; do wget --no-check-certificate "https://ivre.rocks/data/tests/$file" -O "tests/samples/$file" ; done
   ## PCAP files from the Wireshark project
@@ -85,7 +88,7 @@ before_script:
   - export BRO_SAMPLES=`pwd`/usr/local/bro/testing
   - ivre --version; echo; bro --version
 
-script: cd tests/ && travis_wait 60 python tests.py --coverage
+script: cd tests/ && python tests.py --coverage
 
 after_success:
   - codecov

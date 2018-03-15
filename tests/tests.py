@@ -308,27 +308,50 @@ class IvreTests(unittest.TestCase):
         while cls.children:
             os.waitpid(cls.children.pop(), 0)
 
-    def _check_top_value_api(self, name, field, count):
-        self.check_value(name, list(ivre.db.db.nmap.topvalues(field,
-                                                              topnbr=count)),
-                         check=self.assertItemsEqual)
+    def _sort_top_values(self, listval):
+        maxval = None
+        values = []
+        for elem in listval:
+            if not elem['_id'] or elem['_id'] == "None":
+                # Hack for Postgresql empty field.
+                continue
+            if maxval is None:
+                maxval = elem['count']
+            elif maxval != elem['count']:
+                break
+            values.append(elem['_id'])
+        return sorted(values)
 
-    def _check_top_value_cli(self, name, field, count):
+    def _check_top_value_api(self, name, field, count=10):
+        values = self._sort_top_values(
+            ivre.db.db.nmap.topvalues(field, topnbr=count)
+        )
+        self.check_value(name, values, check=self.assertItemsEqual)
+
+    def _check_top_value_cli(self, name, field, count=10):
         res, out, err = RUN(["ivre", "scancli", "--top", field, "--limit",
                              str(count)])
         self.assertTrue(not err)
         self.assertEqual(res, 0)
-        self.check_value(name, [line for line in out.decode().split('\n')
-                                if line],
+        listval = []
+        for line in out.decode().split('\n'):
+            if not line:
+                continue
+            line = line.split(": ", 1)
+            listval.append({'_id': line[0], 'count': int(line[1])})
+        self.check_value(name, self._sort_top_values(listval),
                          check=self.assertItemsEqual)
 
-    def _check_top_value_cgi(self, name, field, count):
+    def _check_top_value_cgi(self, name, field, count=10):
         req = Request('http://%s:%d/cgi-bin/scanjson.py?action='
                       'topvalues:%s:%d' % (HTTPD_HOSTNAME, HTTPD_PORT,
                                            field, count))
         req.add_header('Referer',
                        'http://%s:%d/' % (HTTPD_HOSTNAME, HTTPD_PORT))
-        self.check_value(name, json.loads(urlopen(req).read().decode()),
+        listval = []
+        for elem in json.loads(urlopen(req).read().decode()):
+            listval.append({'_id': elem['label'], 'count': elem['value']})
+        self.check_value(name, self._sort_top_values(listval),
                          check=self.assertItemsEqual)
 
     def check_top_value(self, name, field, count=10):
@@ -520,6 +543,10 @@ class IvreTests(unittest.TestCase):
         self.assertEqual(hosts_count + archives_count,
                          host_counter)
 
+        # JSON
+        res, out, _ = RUN(['ivre', 'scancli', '--json'])
+        self.assertEqual(res, 0)
+        self.check_value("nmap_json_count", len(out.splitlines()))
         # Object ID
         res, out, _ = RUN(["ivre", "scancli", "--json", "--limit", "1"])
         self.assertEqual(res, 0)
@@ -581,16 +608,6 @@ class IvreTests(unittest.TestCase):
             ivre.db.db.nmap.searchhost(addr),
         ))
         self.assertEqual(count, 1)
-        # Remove
-        result = next(ivre.db.db.nmap.get(
-            ivre.db.db.nmap.searchhost(addr)
-        ))
-        ivre.db.db.nmap.remove(result)
-        count = ivre.db.db.nmap.count(
-            ivre.db.db.nmap.searchhost(addr)
-        )
-        self.assertEqual(count, 0)
-        hosts_count -= 1
         recid = ivre.db.db.nmap.getid(
             next(ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty))
         )
@@ -911,96 +928,45 @@ class IvreTests(unittest.TestCase):
             "nmap_isakmp_count",
             ["ivre", "scancli", "--count", "--service", "isakmp"],
         )
-        self.check_value_cmd(
-            "nmap_isakmp_top_products",
-            ["ivre", "scancli", "--top", "product", "--service", "isakmp"],
-        )
+        ### FIXME: add --service option to check_top_value_cli.
+        #self._check_value_cli(
+        #    "nmap_isakmp_top_products",
+        #    ["ivre", "scancli", "--top", "product", "--service", "isakmp"],
+        #)
         self.check_top_value("nmap_ssh_top_port", "port:ssh")
         self.check_lines_value_cmd(
             "nmap_domains_pttsh_tw",
             ["ivre", "scancli", "--domain", "/^pttsh.*tw$/i",
              "--distinct", "hostnames.name"]
         )
-        self.check_value_cmd("nmap_top_filename",
-                             ["ivre", "scancli", "--top", "file", "--limit",
-                              "1"])
-        self.check_value_cmd("nmap_top_filename",
-                             ["ivre", "scancli", "--top", "file.filename",
-                              "--limit", "1"])
-        self.check_value_cmd("nmap_top_anonftp_filename",
-                             ["ivre", "scancli", "--top", "file:ftp-anon",
-                              "--limit", "1"])
-        self.check_value_cmd("nmap_top_anonftp_filename",
-                             ["ivre", "scancli", "--top",
-                              "file:ftp-anon.filename", "--limit", "1"])
-        self.check_value_cmd("nmap_top_uids",
-                             ["ivre", "scancli", "--top", "file.uid"])
-        self.check_value_cmd("nmap_top_anonftp_uids",
-                             ["ivre", "scancli", "--top", "file:ftp-anon.uid"])
-        self.check_value_cmd("nmap_top_modbus_deviceids",
-                             ["ivre", "scancli", "--top", "modbus.deviceid"])
-        self.check_value_cmd("nmap_top_services",
-                             ["ivre", "scancli", "--top", "service"])
-        self.check_value_cmd("nmap_top_product",
-                             ["ivre", "scancli", "--top", "product"])
-        self.check_value_cmd("nmap_top_product_http",
-                             ["ivre", "scancli", "--top", "product:http"])
-        self.check_value_cmd("nmap_top_version",
-                             ["ivre", "scancli", "--top", "version"])
-        self.check_value_cmd("nmap_top_version_http",
-                             ["ivre", "scancli", "--top", "version:http"])
-        self.check_value_cmd("nmap_top_version_http_apache",
-                             ["ivre", "scancli", "--top", "version:http:Apache httpd"])
-
+        self._check_top_value_cli("nmap_top_filename", "file")
+        self._check_top_value_cli("nmap_top_filename", "file.filename")
+        self._check_top_value_cli("nmap_top_anonftp_filename", "file:ftp-anon")
+        self._check_top_value_cli("nmap_top_anonftp_filename", "file:ftp-anon.filename")
+        self._check_top_value_cli("nmap_top_uids", "file.uid")
+        self._check_top_value_cli("nmap_top_modbus_deviceids", "modbus.deviceid")
+        self._check_top_value_cli("nmap_top_services", "service")
+        self._check_top_value_cli("nmap_top_product", "product")
+        self._check_top_value_cli("nmap_top_product_http", "product:http")
+        self._check_top_value_cli("nmap_top_version", "version")
+        self._check_top_value_cli("nmap_top_version_http", "version:http")
+        self._check_top_value_cli("nmap_top_version_http_apache", "version:http:Apache")
         categories = ivre.db.db.nmap.topvalues("category")
         category = next(categories)
         self.assertEqual(category["_id"], "TEST")
         self.assertEqual(category["count"], hosts_count)
         with self.assertRaises(StopIteration):
             next(categories)
-        topgen = ivre.db.db.nmap.topvalues("service")
-        topval = next(topgen)['_id']
-        while topval is None:
-            topval = next(topgen)['_id']
-        self.check_value("nmap_topsrv", topval)
-        topgen = ivre.db.db.nmap.topvalues("service:80")
-        topval = next(topgen)['_id']
-        while topval is None:
-            topval = next(topgen)['_id']
-        self.check_value("nmap_topsrv_80", topval)
-        topgen = ivre.db.db.nmap.topvalues("product")
-        topval = next(topgen)['_id']
-        while topval[1] is None:
-            topval = list(next(topgen)['_id'])
-        self.check_value("nmap_topprod", topval)
-        topgen = ivre.db.db.nmap.topvalues("product:80")
-        topval = list(next(topgen)['_id'])
-        while topval[1] is None:
-            topval = list(next(topgen)['_id'])
-        self.check_value("nmap_topprod_80", topval)
-        topgen = ivre.db.db.nmap.topvalues("devicetype")
-        topval = next(topgen)['_id']
-        while topval is None:
-            topval = next(topgen)['_id']
-        self.check_value("nmap_topdevtype", topval)
-        topgen = ivre.db.db.nmap.topvalues("devicetype:80")
-        topval = next(topgen)['_id']
-        while topval is None:
-            topval = next(topgen)['_id']
-        self.check_value("nmap_topdevtype_80", topval)
-        self.check_value(
-            "nmap_topdomain",
-            next(ivre.db.db.nmap.topvalues("domains"))['_id'])
-        self.check_value(
-            "nmap_topdomains_1",
-            next(ivre.db.db.nmap.topvalues("domains:1"))['_id'])
-        self.check_value(
-            "nmap_tophop",
-            next(ivre.db.db.nmap.topvalues("hop"))['_id'])
-        self.check_value(
-            "nmap_tophop_10+",
-            next(ivre.db.db.nmap.topvalues("hop>10"))['_id'])
-
+        self._check_top_value_api("nmap_topsrv", "service")
+        self._check_top_value_api("nmap_topsrv_80", "service:80")
+        self._check_top_value_api("nmap_topprod", "product")
+        self._check_top_value_api("nmap_topprod_80", "product:80")
+        self._check_top_value_api("nmap_topdevtype", "devicetype")
+        self._check_top_value_api("nmap_topdevtype_80", "devicetype:80")
+        self._check_top_value_api("nmap_topdomain", "domains")
+        self._check_top_value_api("nmap_topdomains_1", "domains:1")
+        self._check_top_value_api("nmap_tophop", "hop")
+        self._check_top_value_api("nmap_tophop_10+", "hop>10")
         locations = list(ivre.db.db.nmap.getlocations(
             ivre.db.db.nmap.flt_empty
         ))
@@ -1011,6 +977,16 @@ class IvreTests(unittest.TestCase):
                             for elt in locations))
         self.assertTrue(all(isinstance(elt['count'], int) for elt in locations))
         self.check_value('nmap_location_count', len(locations))
+        # Remove
+        result = next(ivre.db.db.nmap.get(
+            ivre.db.db.nmap.searchhost(addr)
+        ))
+        ivre.db.db.nmap.remove(result)
+        count = ivre.db.db.nmap.count(
+            ivre.db.db.nmap.searchhost(addr)
+        )
+        self.assertEqual(count, 0)
+        hosts_count -= 1
 
         if DATABASE != "postgres":
             # FIXME: for some reason, this does not terminate
@@ -1343,8 +1319,10 @@ class IvreTests(unittest.TestCase):
         self.assertEqual(res, 0)
 
         # Insert
-        res = RUN(["ivre", "ipdata", "--import-all",
-                   "--no-update-passive-db"])[0]
+        proc = RUN_ITER(["ivre", "ipdata", "--import-all",
+                         "--no-update-passive-db"],
+                        stdout=sys.stdout, stderr=sys.stderr)
+        res = proc.wait()
         self.assertEqual(res, 0)
 
         res, out, _ = RUN(["ivre", "ipdata", "8.8.8.8"])
@@ -1611,6 +1589,17 @@ class IvreTests(unittest.TestCase):
                         ),
                         i + 1,
                     )
+
+        # Iptables
+        with ivre.parser.iptables.Iptables(os.path.join(SAMPLES, 'iptables.log')) as ipt_parser:
+            count=0
+            for res in ipt_parser:
+                count+=1
+                self.assertTrue(b'proto' in res  and b'src' in res and b'dst' in res)
+                if res[b'proto'].decode() in ('udp', 'tcp'):
+                    self.assertTrue(b'sport' in res and b'dport' in res)
+
+            self.assertEqual(count, 40)
 
     def test_scans(self):
         "Run scans, with and without agents"
@@ -1915,6 +1904,7 @@ if __name__ == '__main__':
     import ivre.db
     import ivre.mathutils
     import ivre.parser.bro
+    import ivre.parser.iptables
     import ivre.passive
     import ivre.utils
     if not ivre.config.DEBUG:

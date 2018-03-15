@@ -54,6 +54,11 @@ Or:
     $ ivre flow2db flows.nfdump
 ```
 
+Or:
+```bash
+    $ ivre flow2db -t iptables iptables-from-syslog.log
+
+```
 Any of these tools can be called with '--init' to reinitialize the DB.
 
 ## Data exploration ##
@@ -201,5 +206,5 @@ Available operators are:
 
 ---
 
-This file is part of IVRE. Copyright 2011 - 2017
+This file is part of IVRE. Copyright 2011 - 2018
 [Pierre LALET](mailto:pierre.lalet@cea.fr)

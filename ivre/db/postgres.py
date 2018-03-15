@@ -615,6 +615,14 @@ class PostgresDB(DB):
         self.drop()
         self.create()
 
+    @staticmethod
+    def to_binary(data):
+        return utils.encode_b64(data).decode()
+
+    @staticmethod
+    def from_binary(data):
+        return utils.decode_b64(data.encode())
+
     def copy_from(self, *args, **kargs):
         cursor = self.db.raw_connection().cursor()
         conn = self.db.connect()
@@ -1017,13 +1025,16 @@ class PostgresDBData(PostgresDB, DBData):
 
     def feed_geoip_city(self, fname, feedipdata=None,
                         createipdata=False):
+        utils.LOGGER.debug("START IMPORT: %s", fname)
         with GeoIPCSVLocationRangeFile(fname, skip=2) as fdesc:
             self.copy_from(
                 fdesc, Location_Range.__tablename__, null='',
                 columns=['start', 'stop', 'location_id'],
             )
+        utils.LOGGER.debug("IMPORT DONE (%s)", fname)
 
     def feed_country_codes(self, fname):
+        utils.LOGGER.debug("START IMPORT: %s", fname)
         with CSVFile(fname) as fdesc:
             self.copy_from(fdesc, Country.__tablename__, null='')
         # Missing from iso3166.csv file but used in GeoIPCity-Location.csv
@@ -1031,8 +1042,10 @@ class PostgresDBData(PostgresDB, DBData):
             code="AN",
             name="Netherlands Antilles",
         ))
+        utils.LOGGER.debug("IMPORT DONE (%s)", fname)
 
     def feed_city_location(self, fname):
+        utils.LOGGER.debug("START IMPORT: %s", fname)
         with GeoIPCSVLocationFile(fname, skip=2) as fdesc:
             self.copy_from(
                 fdesc, Location.__tablename__, null='',
@@ -1040,9 +1053,11 @@ class PostgresDBData(PostgresDB, DBData):
                          'postal_code', 'coordinates', 'metro_code',
                          'area_code'],
             )
+        utils.LOGGER.debug("IMPORT DONE (%s)", fname)
 
     def feed_geoip_asnum(self, fname, feedipdata=None,
                          createipdata=False):
+        utils.LOGGER.debug("START IMPORT: %s", fname)
         with GeoIPCSVASFile(fname) as fdesc:
             tmp = self.create_tmp_table(AS)
             self.copy_from(fdesc, tmp.name, null='')
@@ -1053,6 +1068,7 @@ class PostgresDBData(PostgresDB, DBData):
                 fdesc, AS_Range.__tablename__, null='',
                 columns=['start', 'stop', 'aut_sys'],
             )
+        utils.LOGGER.debug("IMPORT DONE (%s)", fname)
 
     def country_byip(self, addr):
         try:
@@ -1311,7 +1327,7 @@ class PostgresDBNmap(PostgresDB, DBNmap):
     def __init__(self, url):
         PostgresDB.__init__(self, url)
         DBNmap.__init__(self)
-        self.content_handler = xmlnmap.Nmap2Posgres
+        self.content_handler = xmlnmap.Nmap2DB
         self.output_function = None
         self.flt_empty = NmapFilter()
         self.bulk = None
