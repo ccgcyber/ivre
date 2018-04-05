@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2017 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -27,8 +27,10 @@ import errno
 from functools import reduce
 from glob import glob
 from io import BytesIO
+from itertools import chain
 import json
 import os
+import pipes
 import random
 import re
 from select import select
@@ -41,9 +43,9 @@ import tarfile
 import tempfile
 import time
 try:
-    from urllib.request import urlopen, Request
+    from urllib.request import HTTPError, Request, urlopen
 except ImportError:
-    from urllib2 import Request, urlopen
+    from urllib2 import HTTPError, Request, urlopen
 
 
 from builtins import int, range
@@ -54,6 +56,17 @@ if sys.version_info[:2] < (2, 7):
     import unittest2 as unittest
 else:
     import unittest
+
+
+import ivre
+import ivre.config
+import ivre.db
+import ivre.mathutils
+import ivre.parser.bro
+import ivre.parser.iptables
+import ivre.passive
+import ivre.utils
+import ivre.web.utils
 
 
 HTTPD_PORT = 18080
@@ -90,10 +103,6 @@ def python_run_iter(cmd, stdin=None, stdout=subprocess.PIPE,
     return run_iter(cmd, interp=[sys.executable], stdin=stdin, stdout=stdout,
                     stderr=stderr)
 
-def coverage_init():
-    cov = coverage.coverage(data_suffix=True)
-    cov.erase()
-
 def coverage_run(cmd, stdin=None):
     return run_cmd(cmd, interp=COVERAGE + ["run", "--parallel-mode"],
                    stdin=stdin)
@@ -102,11 +111,6 @@ def coverage_run_iter(cmd, stdin=None, stdout=subprocess.PIPE,
                       stderr=subprocess.PIPE):
     return run_iter(cmd, interp=COVERAGE + ["run", "--parallel-mode"],
                     stdin=stdin, stdout=stdout, stderr=stderr)
-
-def coverage_report():
-    cov = coverage.coverage()
-    cov.combine(strict=True)
-    cov.save()
 
 
 class AgentScanner(object):
@@ -212,6 +216,8 @@ passed to `ivre runscansagent --feed`.
 
 class IvreTests(unittest.TestCase):
 
+    maxDiff = None
+
     def setUp(self):
         try:
             with open(os.path.join(SAMPLES, "results")) as fdesc:
@@ -308,7 +314,8 @@ class IvreTests(unittest.TestCase):
         while cls.children:
             os.waitpid(cls.children.pop(), 0)
 
-    def _sort_top_values(self, listval):
+    @staticmethod
+    def _sort_top_values(listval):
         maxval = None
         values = []
         for elem in listval:
@@ -343,9 +350,9 @@ class IvreTests(unittest.TestCase):
                          check=self.assertItemsEqual)
 
     def _check_top_value_cgi(self, name, field, count=10):
-        req = Request('http://%s:%d/cgi-bin/scanjson.py?action='
-                      'topvalues:%s:%d' % (HTTPD_HOSTNAME, HTTPD_PORT,
-                                           field, count))
+        req = Request('http://%s:%d/cgi/scans/top/%s:%d' % (
+            HTTPD_HOSTNAME, HTTPD_PORT, field, count
+        ))
         req.add_header('Referer',
                        'http://%s:%d/' % (HTTPD_HOSTNAME, HTTPD_PORT))
         listval = []
@@ -357,9 +364,87 @@ class IvreTests(unittest.TestCase):
     def check_top_value(self, name, field, count=10):
         for method in ['api', 'cli', 'cgi']:
             getattr(self, "_check_top_value_%s" % method)(
-                "%s_%s" % (name, method),
-                field, count,
+                "%s_%s" % (name, method), field, count=count,
             )
+
+    def check_count_value_api(self, name_or_value, flt):
+        if isinstance(flt, tuple):
+            flt, archive = flt
+        else:
+            archive = False
+        count = ivre.db.db.nmap.count(flt, archive=archive)
+        if name_or_value is None:
+            pass
+        elif isinstance(name_or_value, str):
+            self.check_value(name_or_value, count)
+        else:
+            self.assertEqual(name_or_value, count)
+        return count
+
+    def check_count_value_cli(self, name_or_value, cliflt):
+        res, out, _ = RUN(["ivre", "scancli", "--count"] + cliflt)
+        self.assertEqual(res, 0)
+        count = int(out)
+        if name_or_value is None:
+            pass
+        elif isinstance(name_or_value, str):
+            self.check_value(name_or_value, count)
+        else:
+            self.assertEqual(name_or_value, count)
+        return count
+
+    def check_count_value_cgi(self, name_or_value, webflt):
+        req = Request('http://%s:%d/cgi/scans/count%s' % (
+            HTTPD_HOSTNAME, HTTPD_PORT,
+            '' if webflt is None else '?q=%s' % webflt,
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        count = json.loads(udesc.read().decode())
+        if name_or_value is None:
+            pass
+        elif isinstance(name_or_value, str):
+            self.check_value(name_or_value, count)
+        else:
+            self.assertEqual(name_or_value, count)
+        return count
+
+    def check_count_value(self, name_or_value, flt, cliflt, webflt):
+        cnt1 = self.check_count_value_api(name_or_value, flt)
+        cnt2 = self.check_count_value_cli(name_or_value, cliflt)
+        cnt3 = self.check_count_value_cgi(name_or_value, webflt)
+        self.assertEqual(cnt1, cnt2)
+        self.assertEqual(cnt1, cnt3)
+        return cnt1
+
+    def find_record_cgi(self, predicate, webflt=None):
+        """Browse the results from the JSON interface to find a record for
+which `predicate()` is True, given `webflt`.
+
+        """
+        current = 0
+        while True:
+            query = [] if webflt is None else [webflt]
+            if current:
+                query.append('skip%%3A%d' % current)
+            query = "?q=%s" % '%20'.join(query) if query else ""
+            req = Request('http://%s:%d/cgi/scans%s' % (
+                HTTPD_HOSTNAME, HTTPD_PORT, query,
+            ))
+            req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                         HTTPD_PORT))
+            udesc = urlopen(req)
+            self.assertEquals(udesc.getcode(), 200)
+            count = 0
+            for record in json.loads(udesc.read().decode()):
+                if predicate(record):
+                    return True
+                count += 1
+            if count < ivre.config.WEB_LIMIT:
+                return False
+            current += count
 
     @classmethod
     def setUpClass(cls):
@@ -390,8 +475,76 @@ class IvreTests(unittest.TestCase):
 
     def test_nmap(self):
 
-        # Start a Web server to test CGI
+        # Start a Web server
         self.start_web_server()
+
+        #
+        # Web server tests
+        #
+
+        # Test invalid Referer: header values
+        ## no header
+        req = Request('http://%s:%d/cgi/config' % (HTTPD_HOSTNAME, HTTPD_PORT))
+        with self.assertRaises(HTTPError) as herror:
+            udesc = urlopen(req)
+        self.assertEquals(herror.exception.getcode(), 400)
+        ## invalid value
+        req = Request('http://%s:%d/cgi/config' % (HTTPD_HOSTNAME, HTTPD_PORT))
+        req.add_header('Referer', 'http://invalid.invalid/invalid')
+        with self.assertRaises(HTTPError) as herror:
+            udesc = urlopen(req)
+        self.assertEquals(herror.exception.getcode(), 400)
+
+        # Get configuration
+        req = Request('http://%s:%d/cgi/config' % (HTTPD_HOSTNAME, HTTPD_PORT))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME, HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        config_values = {
+            "notesbase": ivre.config.WEB_NOTES_BASE,
+            "dflt_limit": ivre.config.WEB_LIMIT,
+            "warn_dots_count": ivre.config.WEB_WARN_DOTS_COUNT,
+            "publicsrv": ivre.config.WEB_PUBLIC_SRV,
+            "uploadok": ivre.config.WEB_UPLOAD_OK,
+            "flow_time_precision": ivre.config.FLOW_TIME_PRECISION,
+            "version": ivre.VERSION,
+        }
+        for line in udesc:
+            self.assertTrue(line.endswith(b';\n'))
+            key, value = line[:-2].decode().split(' = ')
+            self.assertTrue(key.startswith('config.'))
+            key = key[7:]
+            self.assertEquals(json.loads(value), config_values[key])
+
+        # Test redirections & static files
+        req = Request('http://%s:%d/' % (HTTPD_HOSTNAME, HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertEquals(udesc.url,
+                          'http://%s:%d/index.html' % (HTTPD_HOSTNAME,
+                                                       HTTPD_PORT))
+        result = False
+        for line in udesc:
+            if b'This file is part of IVRE.' in line:
+                result = True
+                break
+        self.assertTrue(result)
+
+        # Test dokuwiki pages
+        req = Request('http://%s:%d/dokuwiki/doc:readme' % (HTTPD_HOSTNAME,
+                                                            HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        result = False
+        for line in udesc:
+            if b'is a network recon framework' in line:
+                result = True
+                break
+        self.assertTrue(result)
+
+        #
+        # Database tests
+        #
 
         # Init DB
         self.init_nmap_db()
@@ -524,21 +677,20 @@ class IvreTests(unittest.TestCase):
         self.assertEqual(host_counter, host_counter_test)
         self.assertEqual(scan_counter, scan_warning)
 
-        res, out, _ = RUN(["ivre", "scancli", "--count"])
-        self.assertEqual(res, 0)
-        hosts_count = int(out)
-        res, out, _ = RUN(["ivre", "scancli", "--count", "--archives"])
-        self.assertEqual(res, 0)
-        archives_count = int(out)
+        hosts_count = self.check_count_value("nmap_get_count",
+                                             ivre.db.db.nmap.flt_empty,
+                                             [], None)
+        archives_count = self.check_count_value(
+            "nmap_get_archives_count",
+            (ivre.db.db.nmap.flt_empty, True),
+            ["--archives"], "archives",
+        )
 
-        count = ivre.db.db.nmap.count(ivre.db.db.nmap.searchnonexistent())
-        self.assertEqual(count, 0)
+        self.check_count_value_api(0, ivre.db.db.nmap.searchnonexistent())
 
         # Is the test case OK?
         self.assertGreater(hosts_count, 0)
-        self.check_value("nmap_get_count", hosts_count)
-        self.check_value("nmap_get_archives_count",
-                         archives_count)
+
         # Counting results
         self.assertEqual(hosts_count + archives_count,
                          host_counter)
@@ -561,60 +713,53 @@ class IvreTests(unittest.TestCase):
         self.assertEqual(res, 0)
         self.assertEqual(int(out) + 1, hosts_count)
 
-        res, out, _ = RUN(["ivre", "scancli", "--count",
-                           "--countports", "20", "20"])
-        self.assertEqual(res, 0)
-        portsnb_20 = int(out)
-        self.check_value("nmap_20_ports", portsnb_20)
-
-        res, out, _ = RUN(["ivre", "scancli", "--count",
-                           "--no-countports", "20", "20"])
-        self.assertEqual(res, 0)
-        portsnb_not_20 = int(out)
-
-        self.assertEqual(portsnb_20 + portsnb_not_20, host_counter)
-
-        res, out, _ = RUN(["ivre", "scancli", "--count",
-                           "--countports", "10", "100"])
-        self.assertEqual(res, 0)
-        portsnb_10_100 = int(out)
-        self.check_value("nmap_10-100_ports", portsnb_10_100)
-
-        res, out, _ = RUN(["ivre", "scancli", "--count",
-                           "--no-countports", "10", "100"])
-        self.assertEqual(res, 0)
-        portsnb_not_10_100 = int(out)
-        self.check_int_value_cmd(
-            "nmap_extended_eu_count",
-            ["ivre", "scancli", "--count", "--country=EU*,CH,NO"],
+        portsnb_20 = self.check_count_value(
+            "nmap_20_ports",
+            ivre.db.db.nmap.searchcountopenports(20, 20),
+            ["--countports", "20", "20"], "countports:20",
+        )
+        self.check_count_value(
+            hosts_count - portsnb_20,
+            ivre.db.db.nmap.searchcountopenports(20, 20, neg=True),
+            ["--no-countports", "20", "20"], "!countports:20",
         )
 
-        self.assertEqual(portsnb_10_100 + portsnb_not_10_100, host_counter)
+        portsnb_10_100 = self.check_count_value(
+            "nmap_10-100_ports",
+            ivre.db.db.nmap.searchcountopenports(10, 100),
+            ["--countports", "10", "100"], "countports:10-100",
+        )
+        self.check_count_value(
+            hosts_count - portsnb_10_100,
+            ivre.db.db.nmap.searchcountopenports(10, 100, neg=True),
+            ["--no-countports", "10", "100"], "-countports:10-100",
+        )
+
+        self.check_count_value(
+            "nmap_extended_eu_count",
+            ivre.db.db.nmap.searchcountry(['EU*', 'CH', 'NO']),
+            ["--country=EU*,CH,NO"], "country:EU*,CH,NO"
+        )
 
         # Filters
         addr = next(ivre.db.db.nmap.get(
             ivre.db.db.nmap.flt_empty, fields=["addr"]
         ))['addr']
-        count = ivre.db.db.nmap.count(
-            ivre.db.db.nmap.searchhost(addr)
-        )
-        self.assertEqual(count, 1)
+        self.check_count_value(1, ivre.db.db.nmap.searchhost(addr),
+                               ['--host', ivre.utils.force_int2ip(addr)],
+                               ivre.utils.force_int2ip(addr))
         result = next(ivre.db.db.nmap.get(
             ivre.db.db.nmap.searchhost(addr)
         ))
         self.assertEqual(result['addr'], addr)
-        count = ivre.db.db.nmap.count(ivre.db.db.nmap.flt_and(
+        self.check_count_value_api(1, ivre.db.db.nmap.flt_and(
             ivre.db.db.nmap.searchhost(addr),
             ivre.db.db.nmap.searchhost(addr),
         ))
-        self.assertEqual(count, 1)
         recid = ivre.db.db.nmap.getid(
             next(ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty))
         )
-        count = ivre.db.db.nmap.count(
-            ivre.db.db.nmap.searchid(recid)
-        )
-        self.assertEqual(count, 1)
+        self.check_count_value_api(1, ivre.db.db.nmap.searchid(recid))
         self.assertIsNotNone(
             ivre.db.db.nmap.getscan(
                 ivre.db.db.nmap.getscanids(
@@ -623,40 +768,40 @@ class IvreTests(unittest.TestCase):
             )
         )
 
-        count = ivre.db.db.nmap.count(
-            ivre.db.db.nmap.searchhost("127.12.34.56")
-        )
-        self.assertEqual(count, 0)
+        self.check_count_value(0, ivre.db.db.nmap.searchhost("127.12.34.56"),
+                               ["--host", "127.12.34.56"], "127.12.34.56")
 
         generator = ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty)
-        addrrange = sorted((x['addr'] for x in [next(generator),
-                                                next(generator)]),
-                           key=lambda x: (ivre.utils.ip2int(x)
-                                          if isinstance(x, basestring) else x))
-        addr_range_count = ivre.db.db.nmap.count(
-            ivre.db.db.nmap.searchrange(*addrrange)
+        addrrange = sorted((x['addr'] for x in
+                            [next(generator), next(generator)]),
+                           key=ivre.utils.force_ip2int)
+        addr_range_count = self.check_count_value(
+            None, ivre.db.db.nmap.searchrange(*addrrange),
+            ["--range"] + [ivre.utils.force_int2ip(x) for x in addrrange],
+            "range:%s-%s" % tuple(ivre.utils.force_int2ip(x)
+                                  for x in addrrange),
         )
         self.assertGreaterEqual(addr_range_count, 2)
-        count = ivre.db.db.nmap.count(ivre.db.db.nmap.flt_and(
+        self.check_count_value_api(addr_range_count, ivre.db.db.nmap.flt_and(
             ivre.db.db.nmap.searchcmp("addr", addrrange[0], '>='),
             ivre.db.db.nmap.searchcmp("addr", addrrange[1], '<='),
         ))
-        self.assertEqual(count, addr_range_count)
         addrrange2 = [
             ivre.utils.int2ip(ivre.utils.ip2int(addrrange[0]) - 1)
             if isinstance(addrrange[0], basestring) else addrrange[0] - 1,
             ivre.utils.int2ip(ivre.utils.ip2int(addrrange[1]) + 1)
             if isinstance(addrrange[1], basestring) else addrrange[1] + 1,
         ]
-        count = ivre.db.db.nmap.count(ivre.db.db.nmap.flt_and(
+        self.check_count_value_api(addr_range_count, ivre.db.db.nmap.flt_and(
             ivre.db.db.nmap.searchcmp("addr", addrrange2[0], '>'),
             ivre.db.db.nmap.searchcmp("addr", addrrange2[1], '<'),
         ))
-        self.assertEqual(count, addr_range_count)
-        count = ivre.db.db.nmap.count(
-            ivre.db.db.nmap.searchrange(*addrrange, neg=True)
+        self.check_count_value_api(
+            hosts_count - addr_range_count,
+            ivre.db.db.nmap.searchrange(*addrrange, neg=True),
         )
-        self.assertEqual(count + addr_range_count, hosts_count)
+        self.check_count_value_cgi(hosts_count - addr_range_count,
+                                   "-range:%s-%s" % tuple(addrrange))
         count = sum(
             ivre.db.db.nmap.count(ivre.db.db.nmap.searchnet(net))
             for net in ivre.utils.range2nets(
@@ -790,11 +935,12 @@ class IvreTests(unittest.TestCase):
         addr = next(ivre.db.db.nmap.get(
             ivre.db.db.nmap.flt_empty
         ))['addr']
-        if not isinstance(addr, basestring):
-            addr = ivre.utils.int2ip(addr)
+        addr_i = ivre.utils.force_ip2int(addr)
+        addr = ivre.utils.force_int2ip(addr)
+        addr_net = '.'.join(addr.split('.')[:3]) + '.0/24'
         queries = [
             ivre.db.db.nmap.searchhost(addr),
-            ivre.db.db.nmap.searchnet('.'.join(addr.split('.')[:3]) + '.0/24'),
+            ivre.db.db.nmap.searchnet(addr_net),
             ivre.db.db.nmap.searchrange(max(ivre.utils.ip2int(addr) - 256, 0),
                                         min(ivre.utils.ip2int(addr) + 256,
                                             4294967295)),
@@ -814,6 +960,151 @@ class IvreTests(unittest.TestCase):
                     ivre.db.db.nmap.str2flt(ivre.db.db.nmap.flt2str(query))
                 )
             # FIXME: test PostgreSQL indexes
+
+        # Check Web /scans
+        ## In the whole database
+        self.find_record_cgi(lambda rec: addr == rec['addr'])
+        ## In the /24 network
+        self.find_record_cgi(lambda rec: addr == rec['addr'],
+                             webflt='net:%s' % addr_net)
+        # Check Web functions used for graphs
+        ## onlyips / IPs as strings
+        req = Request('http://%s:%d/cgi/scans/onlyips?q=net:%s' % (
+            HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr in json.loads(udesc.read().decode()))
+        ## onlyips / IPs as numbers
+        req = Request(
+            'http://%s:%d/cgi/scans/onlyips?q=net:%s&ipsasnumbers=1' % (
+                HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+            )
+        )
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr_i in json.loads(udesc.read().decode()))
+        ## ipsports / IPs as strings
+        req = Request('http://%s:%d/cgi/scans/ipsports?q=net:%s' % (
+            HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr in
+                        (x[0] for x in json.loads(udesc.read().decode())))
+        ## ipsports / IPs as numbers
+        req = Request(
+            'http://%s:%d/cgi/scans/ipsports?q=net:%s&ipsasnumbers=1' % (
+                HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+            )
+        )
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr_i in
+                        (x[0] for x in json.loads(udesc.read().decode())))
+        ## timeline / IPs as strings
+        req = Request('http://%s:%d/cgi/scans/timeline?q=net:%s' % (
+            HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr in
+                        (x[1] for x in json.loads(udesc.read().decode())))
+        ## timeline / IPs as numbers
+        req = Request(
+            'http://%s:%d/cgi/scans/timeline?q=net:%s&ipsasnumbers=1' % (
+                HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+            )
+        )
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr_i in
+                        (x[1] for x in json.loads(udesc.read().decode())))
+        ## timeline - modulo 24h / IPs as strings
+        req = Request(
+            'http://%s:%d/cgi/scans/timeline?q=net:%s&modulo=86400' % (
+                HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+            )
+        )
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr in
+                        (x[1] for x in json.loads(udesc.read().decode())))
+        ## timeline - modulo 24h / IPs as numbers
+        req = Request(
+            'http://%s:%d/cgi/scans/timeline?'
+            'q=net:%s&ipsasnumbers=1&modulo=86400' % (
+                HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+            )
+        )
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr_i in
+                        (x[1] for x in json.loads(udesc.read().decode())))
+        ## countopenports / IPs as strings
+        req = Request('http://%s:%d/cgi/scans/countopenports?q=net:%s' % (
+            HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr in
+                        (x[0] for x in json.loads(udesc.read().decode())))
+        ## countopenports / IPs as numbers
+        req = Request(
+            'http://%s:%d/cgi/scans/countopenports?q=net:%s&ipsasnumbers=1' % (
+                HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+            )
+        )
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(addr_i in
+                        (x[0] for x in json.loads(udesc.read().decode())))
+        ## coordinates
+        result = next(ivre.db.db.nmap.get(
+            ivre.db.db.nmap.searchcity(re.compile('.'))
+        ))
+        addr = ivre.utils.force_int2ip(result['addr'])
+        addr_net = '.'.join(addr.split('.')[:3]) + '.0/24'
+        coords = result['infos']['loc']['coordinates']
+        req = Request('http://%s:%d/cgi/scans/coordinates?q=net:%s' % (
+            HTTPD_HOSTNAME, HTTPD_PORT, addr_net,
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(
+            coords in
+            (x['coordinates']
+             for x in json.loads(udesc.read().decode())['geometries'])
+        )
+        # Check Web /scans (again, new addresses)
+        ## In the whole database
+        self.find_record_cgi(lambda rec: addr == rec['addr'])
+        ## In the /24 network
+        self.find_record_cgi(lambda rec: addr == rec['addr'],
+                             webflt='net:%s' % addr_net)
+
         count = ivre.db.db.nmap.count(ivre.db.db.nmap.searchx11())
         self.check_value("nmap_x11_count", count)
         count = ivre.db.db.nmap.count(ivre.db.db.nmap.searchx11access())
@@ -934,6 +1225,10 @@ class IvreTests(unittest.TestCase):
         #    ["ivre", "scancli", "--top", "product", "--service", "isakmp"],
         #)
         self.check_top_value("nmap_ssh_top_port", "port:ssh")
+        self.check_top_value("nmap_http_top_content_type",
+                             "httphdr:content-type")
+        self.check_top_value("nmap_http_top_header", "httphdr.name")
+        self.check_top_value("nmap_http_top_header_value", "httphdr.value")
         self.check_lines_value_cmd(
             "nmap_domains_pttsh_tw",
             ["ivre", "scancli", "--domain", "/^pttsh.*tw$/i",
@@ -977,6 +1272,69 @@ class IvreTests(unittest.TestCase):
                             for elt in locations))
         self.assertTrue(all(isinstance(elt['count'], int) for elt in locations))
         self.check_value('nmap_location_count', len(locations))
+
+        # moduli
+        proc = RUN_ITER(["ivre", "getmoduli", "--active-ssl", "--active-ssh"],
+                        stderr=None)
+        distinct = 0
+        maxcount = 0
+        for line in proc.stdout:
+            distinct += 1
+            count = int(line.split()[1])
+            if count > maxcount:
+                maxcount = count
+        self.assertEqual(proc.wait(), 0)
+        self.check_value("nmap_distinct_moduli", distinct)
+        self.check_value("nmap_max_moduli_reuse", maxcount)
+        proc = RUN_ITER(["ivre", "getmoduli", "--active-ssl"],
+                        stderr=None)
+        distinct = 0
+        maxcount = 0
+        for line in proc.stdout:
+            distinct += 1
+            count = int(line.split()[1])
+            if count > maxcount:
+                maxcount = count
+        self.assertEqual(proc.wait(), 0)
+        self.check_value("nmap_distinct_ssl_moduli", distinct)
+        self.check_value("nmap_max_moduli_ssl_reuse", maxcount)
+        proc = RUN_ITER(["ivre", "getmoduli", "--active-ssh"],
+                        stderr=None)
+        distinct = 0
+        maxcount = 0
+        for line in proc.stdout:
+            distinct += 1
+            count = int(line.split()[1])
+            if count > maxcount:
+                maxcount = count
+        self.assertEqual(proc.wait(), 0)
+        self.check_value("nmap_distinct_ssh_moduli", distinct)
+        self.check_value("nmap_max_moduli_ssh_reuse", maxcount)
+
+        # http headers
+        self.check_count_value("nmap_count_httphdr",
+                               ivre.db.db.nmap.searchhttphdr(),
+                               ["--httphdr", ""], "httphdr")
+        self.check_count_value(
+            "nmap_count_httphdr_contentype",
+            ivre.db.db.nmap.searchhttphdr(name="content-type"),
+            ["--httphdr", "content-type"], "httphdr:content-type",
+        )
+        self.check_count_value(
+            "nmap_count_httphdr_contentype_textplain",
+            ivre.db.db.nmap.searchhttphdr(name="content-type",
+                                          value="text/plain"),
+            ["--httphdr", "content-type:text/plain"],
+            "httphdr:content-type:text/plain",
+        )
+        self.check_count_value(
+            "nmap_count_httphdr_contentype_plain",
+            ivre.db.db.nmap.searchhttphdr(name="content-type",
+                                          value=re.compile("plain", re.I)),
+            ["--httphdr", "content-type:/plain/i"],
+            "httphdr:content-type:/plain/i",
+        )
+
         # Remove
         result = next(ivre.db.db.nmap.get(
             ivre.db.db.nmap.searchhost(addr)
@@ -1013,10 +1371,13 @@ class IvreTests(unittest.TestCase):
                            fname])[0]
                 self.assertEqual(res, 0)
             broprocess = subprocess.Popen(
-                ['bro', '-b', '-r', fname,
+                ['bro', '-C', '-b', '-r', fname,
                  os.path.join(
-                     ivre.config.guess_prefix('passiverecon'),
-                     'passiverecon.bro')],
+                     ivre.config.guess_prefix('bro'),
+                     'ivre', 'passiverecon', 'bare.bro'),
+                 '-e',
+                 'redef tcp_content_deliver_all_resp = T; '
+                 'redef tcp_content_deliver_all_orig = T;'],
                 env=broenv)
             broprocess.wait()
 
@@ -1037,6 +1398,11 @@ class IvreTests(unittest.TestCase):
                 COVERAGE + [
                     "run", "--parallel-mode", which("ivre"),
                     "passivereconworker", "--directory", "logs",
+                    "--progname", " ".join(
+                        pipes.quote(elt) for elt in
+                        COVERAGE + ["run", "--parallel-mode", which("ivre"),
+                                    "passiverecon2db"]
+                    ),
                 ],
             )
         else:
@@ -1222,6 +1588,44 @@ class IvreTests(unittest.TestCase):
                 values["count"],
             )
 
+        # moduli
+        proc = RUN_ITER(["ivre", "getmoduli", "--passive-ssl", "--passive-ssh"],
+                        stderr=None)
+        distinct = 0
+        maxcount = 0
+        for line in proc.stdout:
+            distinct += 1
+            count = int(line.split()[1])
+            if count > maxcount:
+                maxcount = count
+        self.assertEqual(proc.wait(), 0)
+        self.check_value("passive_distinct_moduli", distinct)
+        self.check_value("passive_max_moduli_reuse", maxcount)
+        proc = RUN_ITER(["ivre", "getmoduli", "--passive-ssl"],
+                        stderr=None)
+        distinct = 0
+        maxcount = 0
+        for line in proc.stdout:
+            distinct += 1
+            count = int(line.split()[1])
+            if count > maxcount:
+                maxcount = count
+        self.assertEqual(proc.wait(), 0)
+        self.check_value("passive_distinct_ssl_moduli", distinct)
+        self.check_value("passive_max_moduli_ssl_reuse", maxcount)
+        proc = RUN_ITER(["ivre", "getmoduli", "--passive-ssh"],
+                        stderr=None)
+        distinct = 0
+        maxcount = 0
+        for line in proc.stdout:
+            distinct += 1
+            count = int(line.split()[1])
+            if count > maxcount:
+                maxcount = count
+        self.assertEqual(proc.wait(), 0)
+        self.check_value("passive_distinct_ssh_moduli", distinct)
+        self.check_value("passive_max_moduli_ssh_reuse", maxcount)
+
         # Delete
         flt = ivre.db.db.passive.searchcert()
         count = ivre.db.db.passive.count(flt)
@@ -1250,7 +1654,8 @@ class IvreTests(unittest.TestCase):
 
         for tail in ["tail", "tailnew"]:
             ret, out, _ = RUN(["ivre", "ipinfo", "--%s" % tail, "1"])
-            self.assertEqual(len(out.splitlines()), 1)
+            self.assertEqual(sum(1 for line in out.splitlines()
+                                 if line[:1] != b"\t"), 1)
             self.assertEqual(ret, 0)
 
         def alarm_handler(signum, stacktrace):
@@ -1268,13 +1673,18 @@ class IvreTests(unittest.TestCase):
             # See https://stackoverflow.com/a/26761671
             for line in iter(proc.stdout.readline, b""):
                 if line[:1] == b'\t':
+                    # we do not count "info" lines
                     continue
                 out.append(line)
                 if len(out) == 10:
                     break
-            signal.alarm(20)
+            signal.alarm(30)
             self.assertEqual(len(out), 10)
-            self.assertFalse(select([proc.stdout], [], [], 10)[0])
+            # When we have read 10 lines, we only want to read "info"
+            # lines
+            while select([proc.stdout], [], [], 10)[0]:
+                line = proc.stdout.readline()
+                self.assertTrue(line[:1] == b'\t')
             #proc.send_signal(signal.SIGINT)
             #ret = proc.wait()
             #self.assertEqual(ret, 0)
@@ -1322,8 +1732,7 @@ class IvreTests(unittest.TestCase):
         proc = RUN_ITER(["ivre", "ipdata", "--import-all",
                          "--no-update-passive-db"],
                         stdout=sys.stdout, stderr=sys.stderr)
-        res = proc.wait()
-        self.assertEqual(res, 0)
+        self.assertEqual(proc.wait(), 0)
 
         res, out, _ = RUN(["ivre", "ipdata", "8.8.8.8"])
         self.assertEqual(res, 0)
@@ -1540,6 +1949,20 @@ class IvreTests(unittest.TestCase):
         ))
         ivre.utils.cleandir(ivre.config.NMAP_SHARE_PATH)
 
+        # Nmap (and Bro) encoding & decoding
+        # >>> from random import randint
+        # >>> bytes(randint(0, 255) for _ in range(1000))
+        raw_data = b'\xc6\x97\x05\xc8\x16\x96\xaei\xe9\xdd\xe8"\x07\x16\x15\x8c\xf5%x\xb0\x00\xb4\xbcv\xb8A\x19\xefj+RbgH}U\xec\xb4\x1bZ\x08\xd4\xfe\xca\x95z\xa0\x0cB\xabWM\xf1\xfd\x95\xb7)\xbb\xe9\xa7\x8a\x08]\x8a\xcab\xb3\x1eI\xc0Q0\xec\xd0\xd4\xd4bt\xf7\xbb1\xc5\x9c\x85\xf8\x87\x8b\xb2\x87\xed\x82R\xf9}+\xfc\xa4\xf2?\xa5}\x17k\xa6\xb6t\xab\x91\x91\x83?\xb4\x01L\x1fO\xff}\x98j\xa5\x9a\t,\xf3\x8b\x1e\xf4\xd3~\x83\x87\x0b\x95\\\xa9\xaa\xfbi5\xfb\xaau\xc6y\xff\xac\xcb\'\xa5\xf4y\x8f\xab\xf2\x04Z\xf1\xd7\x08\x17\xa8\xa5\xe4\x04\xa5R0\xdb\xa3\xe6\xc0\x88\x9a\xee\x93\x8c\x8a\x8b\xa3\x03\xb6\xdf\xbbHp\x1f\x1d{\x92\xb2\xd7B\xc4\x13\xddD\xb29\xbd\x0f\xd8\xed\x94q\xda\x00\x067\xd8T\xb3I\xd3\x88/wE\xd4C\xec!\xf6 <H\xaa\xea\xc1;\x90\x87)\xc5\xb6\xd6\n\x81r\x16\xa1/\xd0Q<\xa4jT\x0f\xe4\xad\x14>0\xf1\xb7\xec\x08\x7f>"\x96P\xd2;\xc4:\xed\xc0\xcb\x85M\x04&{|k\xd0\x06Yc_\x12S\xb0>\xe0=:\xca1\xca\n\xcb.\xf4\xe2\xb1e\x0e\x16\xd6\x8c\xbc!\xbcWd\x19\x0b\xd7\xa0\xed\x1d>$%\xf7\xfb\xc2(\xef\x13\x82\xcc\xa5\xecc\x1fy_\x9f93\xbcPv\xd7\x9b\xbb\x0b]\x9a\xc7\xbd&5\xb2\x85\x95\xfb\xf2j\x11f\xd8\xdb\x03\xc0\xb1\xda\x08aF\x80\xd8\x18\x7f\xf3\x86N\x91\xa6\xd4i\x83\xd4*$_t\x19\xb3\xa2\x187w2 \x0c#\xe5\xca\x03\xb3@H\xb7\xfb,a\xb8\x02\xe4;/\xc11\xb7\xd8\xdd\x9b\xcc\xdcg\xb4\x9f\x81\x10,\x0e\x0c\'_m\xf8$\xa10\xc4\xe9\xc5G_\x14\x10\xf5& \xcf\xa8\x10:\xee\x1aGL\x966\xd7\x1d?\xb0:\xee\x11\x89\xb9\xeb\x8d\xf7\x02\x00\xdb\xd9/\x8a\x01!\xa5wRc?\xfd\x87\x11E\xa9\x8f\x9ed\x0f.\xffM\xd1\xb4\xe9\x19\xb0\xb0"\xac\x84\xff5D\xa9\x12O\xcc1G#\xb5\x16\xba%{:\xde\xf6\t"\xe7\xed\xa0*\xa3\x89\xabl\x08p\x1d\xc1\xae\x14e)\xf3=\x16\x80\xa8\x1b\xe3OSD&V\x16\xf3*\x8416\xdd6\xe6\xbf,R$\x93s>\x87\xbe\x94\x1c\x10\\o,\xc2\x18ig\xa2\xf7\xc9\x9d|\x8c\xc6\x94\\\xee\xb0\'\x01\x1c\x94\xf8\xea\xda\x91\xf1 \x8cP\x84=\xa0\x1a\x87\xba\xa8\x9c\xd6\xf7\n\'\x99\xb9\xd5L\xd2u\x7f\x13\xf3^_T\xc3\x806\x94\xbe\x94\xee\x0cJ`\xba\xf1\n*\xc2\xc7?[\xa7\xdd\xcbX\x08\xafTsU\x81\xa5r\x86Q\x1b8\xcf\xc8\xab\xf1\x1e\xee,i\x15:*\xb4\x84\x01\xc0\x8f\xb3\xdcER%\xe2\x16\x9f\x80z:\xcdZ\xae$\x04\xbfa\xae+\x84U\xb6\x06 \xfe\xd5Y\xf7\xd9\xbftQ0\xbd\xf3\xf5O\x98\xad\x90n\x97\xbd\x81\x1f-\xe5\x1d\x14R\x94\x9cH\x8bf\x80*!E\x933\x88_\xf2]3\xa7g\x9d\\(S\xdc\xd7\x16OXZ\xf7\xc8\x98jU\xbc]\x92\xf3\xc2S\x0c>\';i.\xab\n\x90\xb33\x80\x17k\xfb9\x14\x1a\xd5\x89##?6Y^|{c\x86\x1cF\xc1\x9c\xf1\xcb^\x92\xed\x92$\x15\x81e:\xfc\x13\x1d\x07\xd9\xe9\xd5\x1f(\xef\xc1K\xeem\xa8f7O\x89\xa8\x08\xbd\x12\xeb\xa8\xa6\x9d\xba\xbe\x06\x820x\x18x\xe8A-<p\xd2-\x9c\x00\xde\xbdE\x1bn\x81\x93\x1c\xca\xfc\xe4($\x13\x147\x9d,(t\xffiT\xa6ZU\xc2\xd9<\xba\xa1F\x11\x19N\xb8\xeeA-jC\xdf\xff\x94k\xb5G\x8c\x9e\x19\xff\xf6\x8bg\xb4\x19!\xe9\\\xccB\xd0Y\x08\xfa\'\xc2\x0eYMW\x9fdM0\xb0A\xb5R\xd3t\x8b\t\xb5\xcew,f\x9c\xed\\t\xbc\xf11\xa9\xd3\xef\xdd\xf6\xcf\x96\xe1$\x9a@\xb3v\x05\xc5\xc3\x9e%\xb2\xf8\xe8\xdcd81u\xa8Y\x07\xb15\xe9\xa7\xae\xee\xa9GD\x9e\x7fP\xcf\xd8ca%\xb16\xb6\xc4FP\xed\x8e\x83\x05\x15F'
+        encoded_data = ivre.utils.nmap_encode_data(raw_data)
+        self.assertEqual(
+            encoded_data,
+            '\\xc6\\x97\\x05\\xc8\\x16\\x96\\xaei\\xe9\\xdd\\xe8"\\x07\\x16\\x15\\x8c\\xf5%x\\xb0\\x00\\xb4\\xbcv\\xb8A\\x19\\xefj+RbgH}U\\xec\\xb4\\x1bZ\\x08\\xd4\\xfe\\xca\\x95z\\xa0\\x0cB\\xabWM\\xf1\\xfd\\x95\\xb7)\\xbb\\xe9\\xa7\\x8a\\x08]\\x8a\\xcab\\xb3\\x1eI\\xc0Q0\\xec\\xd0\\xd4\\xd4bt\\xf7\\xbb1\\xc5\\x9c\\x85\\xf8\\x87\\x8b\\xb2\\x87\\xed\\x82R\\xf9}+\\xfc\\xa4\\xf2?\\xa5}\\x17k\\xa6\\xb6t\\xab\\x91\\x91\\x83?\\xb4\\x01L\\x1fO\\xff}\\x98j\\xa5\\x9a\\t,\\xf3\\x8b\\x1e\\xf4\\xd3~\\x83\\x87\\x0b\\x95\\\\\\xa9\\xaa\\xfbi5\\xfb\\xaau\\xc6y\\xff\\xac\\xcb\'\\xa5\\xf4y\\x8f\\xab\\xf2\\x04Z\\xf1\\xd7\\x08\\x17\\xa8\\xa5\\xe4\\x04\\xa5R0\\xdb\\xa3\\xe6\\xc0\\x88\\x9a\\xee\\x93\\x8c\\x8a\\x8b\\xa3\\x03\\xb6\\xdf\\xbbHp\\x1f\\x1d{\\x92\\xb2\\xd7B\\xc4\\x13\\xddD\\xb29\\xbd\\x0f\\xd8\\xed\\x94q\\xda\\x00\\x067\\xd8T\\xb3I\\xd3\\x88/wE\\xd4C\\xec!\\xf6 <H\\xaa\\xea\\xc1;\\x90\\x87)\\xc5\\xb6\\xd6\\n\\x81r\\x16\\xa1/\\xd0Q<\\xa4jT\\x0f\\xe4\\xad\\x14>0\\xf1\\xb7\\xec\\x08\\x7f>"\\x96P\\xd2;\\xc4:\\xed\\xc0\\xcb\\x85M\\x04&{|k\\xd0\\x06Yc_\\x12S\\xb0>\\xe0=:\\xca1\\xca\\n\\xcb.\\xf4\\xe2\\xb1e\\x0e\\x16\\xd6\\x8c\\xbc!\\xbcWd\\x19\\x0b\\xd7\\xa0\\xed\\x1d>$%\\xf7\\xfb\\xc2(\\xef\\x13\\x82\\xcc\\xa5\\xecc\\x1fy_\\x9f93\\xbcPv\\xd7\\x9b\\xbb\\x0b]\\x9a\\xc7\\xbd&5\\xb2\\x85\\x95\\xfb\\xf2j\\x11f\\xd8\\xdb\\x03\\xc0\\xb1\\xda\\x08aF\\x80\\xd8\\x18\\x7f\\xf3\\x86N\\x91\\xa6\\xd4i\\x83\\xd4*$_t\\x19\\xb3\\xa2\\x187w2 \\x0c#\\xe5\\xca\\x03\\xb3@H\\xb7\\xfb,a\\xb8\\x02\\xe4;/\\xc11\\xb7\\xd8\\xdd\\x9b\\xcc\\xdcg\\xb4\\x9f\\x81\\x10,\\x0e\\x0c\'_m\\xf8$\\xa10\\xc4\\xe9\\xc5G_\\x14\\x10\\xf5& \\xcf\\xa8\\x10:\\xee\\x1aGL\\x966\\xd7\\x1d?\\xb0:\\xee\\x11\\x89\\xb9\\xeb\\x8d\\xf7\\x02\\x00\\xdb\\xd9/\\x8a\\x01!\\xa5wRc?\\xfd\\x87\\x11E\\xa9\\x8f\\x9ed\\x0f.\\xffM\\xd1\\xb4\\xe9\\x19\\xb0\\xb0"\\xac\\x84\\xff5D\\xa9\\x12O\\xcc1G#\\xb5\\x16\\xba%{:\\xde\\xf6\\t"\\xe7\\xed\\xa0*\\xa3\\x89\\xabl\\x08p\\x1d\\xc1\\xae\\x14e)\\xf3=\\x16\\x80\\xa8\\x1b\\xe3OSD&V\\x16\\xf3*\\x8416\\xdd6\\xe6\\xbf,R$\\x93s>\\x87\\xbe\\x94\\x1c\\x10\\\\o,\\xc2\\x18ig\\xa2\\xf7\\xc9\\x9d|\\x8c\\xc6\\x94\\\\\\xee\\xb0\'\\x01\\x1c\\x94\\xf8\\xea\\xda\\x91\\xf1 \\x8cP\\x84=\\xa0\\x1a\\x87\\xba\\xa8\\x9c\\xd6\\xf7\\n\'\\x99\\xb9\\xd5L\\xd2u\\x7f\\x13\\xf3^_T\\xc3\\x806\\x94\\xbe\\x94\\xee\\x0cJ`\\xba\\xf1\\n*\\xc2\\xc7?[\\xa7\\xdd\\xcbX\\x08\\xafTsU\\x81\\xa5r\\x86Q\\x1b8\\xcf\\xc8\\xab\\xf1\\x1e\\xee,i\\x15:*\\xb4\\x84\\x01\\xc0\\x8f\\xb3\\xdcER%\\xe2\\x16\\x9f\\x80z:\\xcdZ\\xae$\\x04\\xbfa\\xae+\\x84U\\xb6\\x06 \\xfe\\xd5Y\\xf7\\xd9\\xbftQ0\\xbd\\xf3\\xf5O\\x98\\xad\\x90n\\x97\\xbd\\x81\\x1f-\\xe5\\x1d\\x14R\\x94\\x9cH\\x8bf\\x80*!E\\x933\\x88_\\xf2]3\\xa7g\\x9d\\\\(S\\xdc\\xd7\\x16OXZ\\xf7\\xc8\\x98jU\\xbc]\\x92\\xf3\\xc2S\\x0c>\';i.\\xab\\n\\x90\\xb33\\x80\\x17k\\xfb9\\x14\\x1a\\xd5\\x89##?6Y^|{c\\x86\\x1cF\\xc1\\x9c\\xf1\\xcb^\\x92\\xed\\x92$\\x15\\x81e:\\xfc\\x13\\x1d\\x07\\xd9\\xe9\\xd5\\x1f(\\xef\\xc1K\\xeem\\xa8f7O\\x89\\xa8\\x08\\xbd\\x12\\xeb\\xa8\\xa6\\x9d\\xba\\xbe\\x06\\x820x\\x18x\\xe8A-<p\\xd2-\\x9c\\x00\\xde\\xbdE\\x1bn\\x81\\x93\\x1c\\xca\\xfc\\xe4($\\x13\\x147\\x9d,(t\\xffiT\\xa6ZU\\xc2\\xd9<\\xba\\xa1F\\x11\\x19N\\xb8\\xeeA-jC\\xdf\\xff\\x94k\\xb5G\\x8c\\x9e\\x19\\xff\\xf6\\x8bg\\xb4\\x19!\\xe9\\\\\\xccB\\xd0Y\\x08\\xfa\'\\xc2\\x0eYMW\\x9fdM0\\xb0A\\xb5R\\xd3t\\x8b\\t\\xb5\\xcew,f\\x9c\\xed\\\\t\\xbc\\xf11\\xa9\\xd3\\xef\\xdd\\xf6\\xcf\\x96\\xe1$\\x9a@\\xb3v\\x05\\xc5\\xc3\\x9e%\\xb2\\xf8\\xe8\\xdcd81u\\xa8Y\\x07\\xb15\\xe9\\xa7\\xae\\xee\\xa9GD\\x9e\\x7fP\\xcf\\xd8ca%\\xb16\\xb6\\xc4FP\\xed\\x8e\\x83\\x05\\x15F',
+        )
+        self.assertEqual(
+            ivre.utils.nmap_decode_data(encoded_data),
+            raw_data,
+        )
+
         # Math utils
         # http://stackoverflow.com/a/15285588/3223422
         def is_prime(n):
@@ -1600,6 +2023,10 @@ class IvreTests(unittest.TestCase):
                     self.assertTrue(b'sport' in res and b'dport' in res)
 
             self.assertEqual(count, 40)
+
+        # Web utils
+        with self.assertRaises(ValueError):
+            ivre.web.utils.query_from_params({'q': '"'})
 
     def test_scans(self):
         "Run scans, with and without agents"
@@ -1900,25 +2327,15 @@ if __name__ == '__main__':
     SAMPLES = None
     parse_args()
     parse_env()
-    import ivre.config
-    import ivre.db
-    import ivre.mathutils
-    import ivre.parser.bro
-    import ivre.parser.iptables
-    import ivre.passive
-    import ivre.utils
     if not ivre.config.DEBUG:
         sys.stderr.write("You *must* have the DEBUG config value set to "
                          "True to run the tests.\n")
         sys.exit(-1)
     if USE_COVERAGE:
-        import coverage
-        COVERAGE = [sys.executable, os.path.dirname(coverage.__file__)]
+        COVERAGE = [sys.executable,
+                    os.path.dirname(__import__("coverage").__file__)]
         RUN = coverage_run
         RUN_ITER = coverage_run_iter
-        coverage_init()
-        cov = coverage.coverage(data_suffix=True)
-        cov.start()
     else:
         RUN = python_run
         RUN_ITER = python_run_iter
@@ -1930,10 +2347,6 @@ if __name__ == '__main__':
     result = unittest.TextTestRunner(verbosity=2).run(
         unittest.TestLoader().loadTestsFromTestCase(IvreTests),
     )
-    if USE_COVERAGE:
-        cov.stop()
-        cov.save()
-        coverage_report()
     print("run=%d fail=%d errors=%d skipped=%d" % (result.testsRun,
                                                    len(result.failures),
                                                    len(result.errors),

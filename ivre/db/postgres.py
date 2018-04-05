@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2017 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -25,6 +25,7 @@ databases.
 
 from bisect import bisect_left
 import codecs
+from collections import namedtuple
 import csv
 import datetime
 from functools import reduce
@@ -656,6 +657,19 @@ class PostgresDB(DB):
     def flt_or(*args):
         return or_(*args)
 
+    def flt2str(self, flt):
+        result = {}
+        for queryname, queries in viewitems(flt.all_queries):
+            outqueries = []
+            if not isinstance(queries, list):
+                queries = [queries]
+            for query in queries:
+                if query is not None:
+                    outqueries.append(str(query))
+            if outqueries:
+                result[queryname] = outqueries
+        return json.dumps(result)
+
     def store_host_context(self, addr, context, firstseen, lastseen):
         insrt = postgresql.insert(Context)
         ctxt = self.db.execute(insrt.values(name=context)\
@@ -799,12 +813,6 @@ field.
         if limit is not None:
             req = req.limit(limit)
         return (next(iter(viewvalues(res))) for res in self.db.execute(req))
-
-    def get(self, *args, **kargs):
-        cur = self._get(*args, **kargs)
-        # mimic MongoDB cursor.count()
-        cur.count = lambda: cur.rowcount
-        return cur
 
     @classmethod
     def searchhosts(cls, hosts, neg=False):
@@ -1191,21 +1199,29 @@ class Filter(object):
 
 
 class NmapFilter(Filter):
-    def __init__(self, main=None, hostname=None, category=None, source=None,
-                 port=None, script=None, trace=None):
+    def __init__(self, main=None, hostname=None, category=None, port=None,
+                 script=None, trace=None):
         self.main = main
         self.hostname = [] if hostname is None else hostname
         self.category = [] if category is None else category
-        self.source = [] if source is None else source
         self.port = [] if port is None else port
         self.script = [] if script is None else script
         self.trace = [] if trace is None else trace
+    @property
+    def all_queries(self):
+        return {
+            "main": self.main,
+            "hostname": self.hostname,
+            "category": self.category,
+            "port": [elt[1] if elt[0] else not_(elt[1]) for elt in self.port],
+            "script": self.script,
+            "trace": self.trace,
+        }
     def copy(self):
         return self.__class__(
             main=self.main,
             hostname=self.hostname[:],
             category=self.category[:],
-            source=self.source[:],
             port=self.port[:],
             script=self.script[:],
             trace=self.trace[:],
@@ -1215,7 +1231,6 @@ class NmapFilter(Filter):
             main=self.fltand(self.main, other.main),
             hostname=self.hostname + other.hostname,
             category=self.category + other.category,
-            source=self.source + other.source,
             port=self.port + other.port,
             script=self.script + other.script,
             trace=self.trace + other.trace,
@@ -1226,8 +1241,6 @@ class NmapFilter(Filter):
             raise ValueError("Cannot 'OR' two filters on hostname")
         if self.category and other.category:
             raise ValueError("Cannot 'OR' two filters on category")
-        if self.source and other.source:
-            raise ValueError("Cannot 'OR' two filters on source")
         if self.port and other.port:
             raise ValueError("Cannot 'OR' two filters on port")
         if self.script and other.script:
@@ -1238,7 +1251,6 @@ class NmapFilter(Filter):
             main=self.fltor(self.main, other.main),
             hostname=self.hostname + other.hostname,
             category=self.category + other.category,
-            source=self.source + other.source,
             port=self.port + other.port,
             script=self.script + other.script,
             trace=self.trace + other.trace,
@@ -1288,12 +1300,15 @@ class NmapFilter(Filter):
                 base = select([Port.scan]).where(subflt).cte("base")
                 req = req.where(Scan.id.notin_(base))
         for subflt in self.script:
-            req = req.where(exists(
-                select([1])\
-                .select_from(join(Script, Port))\
-                .where(subflt)\
-                .where(Port.scan == Scan.id)
-            ))
+            subreq = select([1]).select_from(join(Script, Port))
+            if isinstance(subflt, tuple):
+                for selectfrom in subflt[1]:
+                    subreq = subreq.select_from(selectfrom)
+                subreq = subreq.where(subflt[0])
+            else:
+                subreq = subreq.where(subflt)
+            subreq = subreq.where(Port.scan == Scan.id)
+            req = req.where(exists(subreq))
         for subflt in self.trace:
             req = req.where(exists(
                 select([1])\
@@ -1323,6 +1338,17 @@ class PostgresDBNmap(PostgresDB, DBNmap):
         "hostnames.name": Hostname.name,
         "hostnames.domains": Hostname.domains,
     }
+    _needunwind_script = set([
+        "http-headers",
+    ])
+
+    @classmethod
+    def needunwind_script(cls, key):
+        key = key.split('.')
+        for i in range(len(key)):
+            subkey = '.'.join(key[:i])
+            if subkey in cls._needunwind_script:
+                yield subkey
 
     def __init__(self, url):
         PostgresDB.__init__(self, url)
@@ -1588,6 +1614,49 @@ insert structures.
     def store_or_merge_host(self, host, gettoarchive, merge=False):
         self.store_host(host, merge=merge)
 
+    def migrate_schema(self, archive, version):
+        """Migrates the scan data. When `archive` is True, do nothing (when
+`archive` is False, migrate both archived and non-archived records;
+this is to remain compatible with MongoDB API without impacting the
+performances).
+
+        """
+        failed = 0
+        if (version or 0) < 9:
+            failed += self.__migrate_schema_8_9()
+        return failed
+
+    def __migrate_schema_8_9(self):
+        """Converts records from version 8 to version 9. Version 9 creates a
+structured output for http-headers script.
+
+        """
+        failed = []
+        req = select([Scan.id, Script.port, Script.output, Script.data])\
+              .select_from(join(join(Scan, Port), Script))\
+              .where(and_(Scan.schema_version == 8, Script.name == "http-headers"))
+        for rec in self.db.execute(req):
+            if 'http-headers' not in rec.data:
+                try:
+                    data = xmlnmap.add_http_headers_data({'id': "http-headers", 'output': rec.output})
+                except:
+                    utils.LOGGER.warning("Cannot migrate host %r", rec.id, exc_info=True)
+                    failed.append(rec.id)
+                else:
+                    if data:
+                        self.db.execute(
+                            update(Script)\
+                            .where(and_(Script.port == rec.port,
+                                        Script.name == "http-headers"))\
+                            .values(data={"http-headers": data})
+                        )
+        self.db.execute(
+            update(Scan)\
+            .where(Scan.id.notin_(failed))\
+            .values(schema_version=9)
+        )
+        return len(failed)
+
     def count(self, flt, archive=False, **_):
         return self.db.execute(
             flt.query(select([func.count()]), archive=archive)\
@@ -1636,7 +1705,7 @@ insert structures.
              "ports": [
                  {"proto": proto, "port": int(port), "state_state": state}
                  for proto, port, state in (
-                     elt.split(',') for elt in rec[0][3:-3].split(')","(')
+                     elt.split(',') for elt in ''.join(rec[0])[3:-3].split(')","(')
                  )
              ]}
             for rec in
@@ -1651,7 +1720,7 @@ insert structures.
                 ])\
                 .select_from(join(Port, Scan))\
                 .group_by(Scan.addr, Scan.time_start)\
-                .where(Scan.id.in_(base))
+                .where(and_(Port.port >= 0, Scan.id.in_(base)))
             )
         )
 
@@ -1773,6 +1842,10 @@ insert structures.
         base = select([Association_Scan_ScanFile.scan_file]).cte('base')
         self.db.execute(delete(ScanFile).where(ScanFile.sha256.notin_(base)))
 
+    _topstructure = namedtuple("topstructure", ["base", "fields", "where",
+                                                "group_by", "extraselectfrom"])
+    _topstructure.__new__.__defaults__ = (None,) * len(_topstructure._fields)
+
     def topvalues(self, field, flt=None, topnbr=10, sort=None,
                   limit=None, skip=None, least=False, archive=False):
         """
@@ -1790,6 +1863,7 @@ insert structures.
           - script:<scriptid> / script:<port>:<scriptid>
             / script:host:<scriptid>
           - cert.* / smb.* / sshkey.*
+          - httphdr / httphdr.{name,value} / httphdr:<name>
           - modbus.* / s7.* / enip.*
           - mongo.dbs.*
           - vulns.*
@@ -1806,12 +1880,13 @@ insert structures.
         order = "count" if least else desc("count")
         outputproc = None
         if field == "port":
-            field = (Port, [Port.protocol, Port.port], Port.state == "open")
+            field = self._topstructure(Port, [Port.protocol, Port.port],
+                                       Port.state == "open")
         elif field == "ttl":
-            field = (Port, [Port.state_reason_ttl],
-                     Port.state_reason_ttl != None)
+            field = self._topstructure(Port, [Port.state_reason_ttl],
+                                       Port.state_reason_ttl != None)
         elif field == "ttlinit":
-            field = (
+            field = self._topstructure(
                 Port,
                 [func.least(255, func.power(2, func.ceil(
                     func.log(2, Port.state_reason_ttl)
@@ -1821,10 +1896,12 @@ insert structures.
             outputproc = int
         elif field.startswith('port:'):
             info = field[5:]
-            field = (Port, [Port.protocol, Port.port],
-                     (Port.state == info)
-                     if info in set(['open', 'filtered', 'closed', 'open|filtered'])
-                     else (Port.service_name == info))
+            field = self._topstructure(
+                Port, [Port.protocol, Port.port],
+                (Port.state == info)
+                if info in ['open', 'filtered', 'closed', 'open|filtered'] else
+                (Port.service_name == info),
+            )
         elif field.startswith('countports:'):
             info = field[11:]
             return ({"count": result[0], "_id": result[1]}
@@ -1891,116 +1968,150 @@ insert structures.
                         .group_by('ports').order_by(order).limit(topnbr)
                     ))
         elif field == "service":
-            field = (Port, [Port.service_name], Port.state == "open")
+            field = self._topstructure(Port, [Port.service_name],
+                                       Port.state == "open")
         elif field.startswith("service:"):
             info = field[8:]
             if '/' in info:
                 info = info.split('/', 1)
-                field = (Port, [Port.service_name],
-                         and_(Port.protocol == info[0],
-                              Port.port == int(info[1])))
+                field = self._topstructure(
+                    Port, [Port.service_name],
+                    and_(Port.protocol == info[0], Port.port == int(info[1])),
+                )
             else:
-                field = (Port, [Port.service_name], Port.port == int(info))
+                field = self._topstructure(Port, [Port.service_name],
+                                           Port.port == int(info))
         elif field == "product":
-            field = (Port, [Port.service_name, Port.service_product],
-                     Port.state == "open")
+            field = self._topstructure(
+                Port, [Port.service_name, Port.service_product],
+                Port.state == "open",
+            )
         elif field.startswith("product:"):
             info = field[8:]
             if info.isdigit():
                 info = int(info)
                 flt = self.flt_and(flt, self.searchport(info))
-                field = (Port, [Port.service_name, Port.service_product],
-                         and_(Port.state == "open", Port.port == info))
+                field = self._topstructure(
+                    Port, [Port.service_name, Port.service_product],
+                    and_(Port.state == "open", Port.port == info),
+                )
             elif info.startswith('tcp/') or info.startswith('udp/'):
                 info = (info[:3], int(info[4:]))
                 flt = self.flt_and(flt, self.searchport(info[1],
                                                         protocol=info[0]))
-                field = (Port, [Port.service_name, Port.service_product],
-                         and_(Port.state == "open", Port.port == info[1],
-                              Port.protocol == info[0]))
+                field = self._topstructure(
+                    Port, [Port.service_name, Port.service_product],
+                    and_(Port.state == "open", Port.port == info[1],
+                         Port.protocol == info[0]),
+                )
             else:
                 flt = self.flt_and(flt, self.searchservice(info))
-                field = (Port, [Port.service_name, Port.service_product],
-                         and_(Port.state == "open", Port.service_name == info))
+                field = self._topstructure(
+                    Port, [Port.service_name, Port.service_product],
+                    and_(Port.state == "open", Port.service_name == info),
+                )
         elif field == "devicetype":
-            field = (Port, [Port.service_devicetype], Port.state == "open")
+            field = self._topstructure(Port, [Port.service_devicetype],
+                                       Port.state == "open")
         elif field.startswith("devicetype:"):
             info = field[11:]
             if info.isdigit():
                 info = int(info)
                 flt = self.flt_and(flt, self.searchport(info))
-                field = (Port, [Port.service_devicetype],
-                         and_(Port.state == "open", Port.port == info))
+                field = self._topstructure(Port, [Port.service_devicetype],
+                                           and_(Port.state == "open",
+                                                Port.port == info))
             elif info.startswith('tcp/') or info.startswith('udp/'):
                 info = (info[:3], int(info[4:]))
                 flt = self.flt_and(flt, self.searchport(info[1],
                                                         protocol=info[0]))
-                field = (Port, [Port.service_devicetype],
-                         and_(Port.state == "open", Port.port == info[1],
-                              Port.protocol == info[0]))
+                field = self._topstructure(Port, [Port.service_devicetype],
+                                           and_(Port.state == "open",
+                                                Port.port == info[1],
+                                                Port.protocol == info[0]))
             else:
                 flt = self.flt_and(flt, self.searchservice(info))
-                field = (Port, [Port.service_devicetype],
-                         and_(Port.state == "open", Port.service_name == info))
+                field = self._topstructure(Port, [Port.service_devicetype],
+                                           and_(Port.state == "open",
+                                                Port.service_name == info))
         elif field == "version":
-            field = (Port, [Port.service_name, Port.service_product,
-                            Port.service_version],
-                     Port.state == "open")
+            field = self._topstructure(
+                Port,
+                [Port.service_name, Port.service_product, Port.service_version],
+                Port.state == "open",
+            )
         elif field.startswith("version:"):
             info = field[8:]
             if info.isdigit():
                 info = int(info)
                 flt = self.flt_and(flt, self.searchport(info))
-                field = (Port, [Port.service_name, Port.service_product,
-                                Port.service_version],
-                         and_(Port.state == "open", Port.port == info))
+                field = self._topstructure(
+                    Port,
+                    [Port.service_name, Port.service_product,
+                     Port.service_version],
+                    and_(Port.state == "open", Port.port == info),
+                )
             elif info.startswith('tcp/') or info.startswith('udp/'):
                 info = (info[:3], int(info[4:]))
                 flt = self.flt_and(flt, self.searchport(info[1],
                                                         protocol=info[0]))
-                field = (Port, [Port.service_name, Port.service_product,
-                                Port.service_version],
-                         and_(Port.state == "open", Port.port == info[1],
-                              Port.protocol == info[0]))
+                field = self._topstructure(
+                    Port,
+                    [Port.service_name, Port.service_product,
+                     Port.service_version],
+                    and_(Port.state == "open", Port.port == info[1],
+                         Port.protocol == info[0]),
+                )
             elif ':' in info:
                 info = info.split(':', 1)
                 flt = self.flt_and(flt, self.searchproduct(info[1], service=info[0]))
-                field = (Port, [Port.service_name, Port.service_product,
-                                Port.service_version],
-                         and_(Port.state == "open", Port.service_name == info[0],
-                              Port.service_product == info[1]))
+                field = self._topstructure(
+                    Port,
+                    [Port.service_name, Port.service_product,
+                     Port.service_version],
+                    and_(Port.state == "open", Port.service_name == info[0],
+                         Port.service_product == info[1]),
+                )
             else:
                 flt = self.flt_and(flt, self.searchservice(info))
-                field = (Port, [Port.service_name, Port.service_product,
-                                Port.service_version],
-                         and_(Port.state == "open", Port.service_name == info))
-
-
+                field = self._topstructure(
+                    Port,
+                    [Port.service_name, Port.service_product,
+                     Port.service_version],
+                    and_(Port.state == "open", Port.service_name == info),
+                )
         elif field == "asnum":
-            field = (Scan, [Scan.info["as_num"]], None)
+            field = self._topstructure(Scan, [Scan.info["as_num"]])
         elif field == "as":
-            field = (Scan, [Scan.info["as_num"], Scan.info["as_name"]], None)
+            field = self._topstructure(Scan, [Scan.info["as_num"],
+                                              Scan.info["as_name"]])
         elif field == "country":
-            field = (Scan, [Scan.info["country_code"],
-                            Scan.info["country_name"]], None)
+            field = self._topstructure(Scan, [Scan.info["country_code"],
+                                              Scan.info["country_name"]])
         elif field == "city":
-            field = (Scan, [Scan.info["country_code"], Scan.info["city"]], None)
+            field = self._topstructure(Scan, [Scan.info["country_code"],
+                                              Scan.info["city"]])
         elif field == "net" or field.startswith("net:"):
             info = field[4:]
             info = int(info) if info else 24
-            field = (Scan, [func.set_masklen(text("scan.addr::cidr"), info)], None)
+            field = self._topstructure(
+                Scan,
+                [func.set_masklen(text("scan.addr::cidr"), info)],
+            )
         elif field == "script" or field.startswith("script:"):
             info = field[7:]
             if info:
-                field = (Script, [Script.output], Script.name == info)
+                field = self._topstructure(Script, [Script.output],
+                                           Script.name == info)
             else:
-                field = (Script, [Script.name], None)
+                field = self._topstructure(Script, [Script.name])
         elif field in ["category", "categories"]:
-            field = (Category, [Category.name], None)
+            field = self._topstructure(Category, [Category.name])
         elif field == "source":
-            field = (Scan, [Scan.source], None)
+            field = self._topstructure(Scan, [Scan.source])
         elif field == "domains":
-            field = (Hostname, [func.unnest(Hostname.domains)], None)
+            field = self._topstructure(Hostname,
+                                       [func.unnest(Hostname.domains)])
         elif field.startswith("domains:"):
             level = int(field[8:]) - 1
             base1 = select([func.unnest(Hostname.domains).label("domains")])\
@@ -2019,11 +2130,13 @@ insert structures.
                         .limit(topnbr)
                     ))
         elif field == "hop":
-            field = (Hop, [Hop.ipaddr], None)
+            field = self._topstructure(Hop, [Hop.ipaddr])
         elif field.startswith('hop') and field[3] in ':>':
             ttl = int(field[4:])
-            field = (Hop, [Hop.ipaddr],
-                     (Hop.ttl > ttl) if field[3] == '>' else (Hop.ttl == ttl))
+            field = self._topstructure(
+                Hop, [Hop.ipaddr],
+                (Hop.ttl > ttl) if field[3] == '>' else (Hop.ttl == ttl),
+            )
         elif field == 'file' or (field.startswith('file') and field[4] in '.:'):
             if field.startswith('file:'):
                 scripts = field[5:]
@@ -2037,7 +2150,7 @@ insert structures.
             else:
                 field = field[5:] or 'filename'
                 flt = True
-            field = (
+            field = self._topstructure(
                 Script,
                 [func.jsonb_array_elements(
                     func.jsonb_array_elements(
@@ -2053,10 +2166,42 @@ insert structures.
             )
         elif field.startswith('modbus.'):
             subfield = field[7:]
-            field = (Script,
-                     [Script.data['modbus-discover'][subfield]],
-                     and_(Script.name == 'modbus-discover',
-                          Script.data['modbus-discover'].has_key(subfield)))
+            field = self._topstructure(
+                Script, [Script.data['modbus-discover'][subfield]],
+                and_(Script.name == 'modbus-discover',
+                     Script.data['modbus-discover'].has_key(subfield)),
+            )
+        elif field == 'httphdr':
+            flt = self.flt_and(flt, self.searchscript(name="http-headers"))
+            field = self._topstructure(
+                Script, [column("hdr").op('->>')('name').label("name"),
+                         column("hdr").op('->>')('value').label("value")],
+                Script.name == 'http-headers',
+                [column("name"), column("value")],
+                func.jsonb_array_elements(
+                    Script.data['http-headers']
+                ).alias('hdr'),
+            )
+        elif field.startswith('httphdr.'):
+            flt = self.flt_and(flt, self.searchscript(name="http-headers"))
+            field = self._topstructure(
+                Script, [column("hdr").op('->>')(field[8:]).label("topvalue")],
+                Script.name == 'http-headers', [column("topvalue")],
+                func.jsonb_array_elements(
+                    Script.data['http-headers']
+                ).alias('hdr'),
+            )
+        elif field.startswith('httphdr:'):
+            flt = self.flt_and(flt, self.searchhttphdr(name=field[8:].lower()))
+            field = self._topstructure(
+                Script, [column("hdr").op('->>')("value").label("value")],
+                and_(Script.name == 'http-headers',
+                     column("hdr").op('->>')("name") == field[8:].lower()),
+                [column("value")],
+                func.jsonb_array_elements(
+                    Script.data['http-headers']
+                ).alias('hdr'),
+            )
         else:
             raise NotImplementedError()
         s_from = {
@@ -2073,21 +2218,26 @@ insert structures.
             Hostname: Hostname.scan == base.c.id,
             Hop: Trace.scan == base.c.id
         }
-        if field[0] == Scan:
+        if field.base == Scan:
             req = flt.query(
-                select([func.count().label("count")] + field[1])\
+                select([func.count().label("count")] + field.fields)\
                 .select_from(Scan)\
-                .group_by(*field[1]),
+                .group_by(*field.fields),
                 archive=archive,
             )
         else:
-            req = select([func.count().label("count")] + field[1])\
-                  .select_from(s_from[field[0]])\
-                  .group_by(*field[1])\
+            req = select([func.count().label("count")] + field.fields)\
+                  .select_from(s_from[field.base])
+            if field.extraselectfrom is not None:
+                req = req.select_from(field.extraselectfrom)
+            req = req\
+                  .group_by(*(field.fields if field.group_by is None
+                              else field.group_by))
+            req = req\
                   .where(exists(select([1]).select_from(base)\
-                                .where(where_clause[field[0]])))
-        if field[2] is not None:
-            req = req.where(field[2])
+                                .where(where_clause[field.base])))
+        if field.where is not None:
+            req = req.where(field.where)
         if outputproc is None:
             return ({"count": result[0],
                      "_id": result[1:] if len(result) > 2 else result[1]}
@@ -2323,10 +2473,85 @@ insert structures.
             if name is None:
                 raise TypeError(".searchscript() needs a `name` arg "
                                 "when using a `values` arg")
-            req = and_(req, Script.data.contains(
-                {xmlnmap.ALIASES_TABLE_ELEMS.get(name, name): values}
+            basekey = xmlnmap.ALIASES_TABLE_ELEMS.get(name, name)
+            needunwind = sorted(set(
+                unwind
+                for subkey in values
+                for unwind in cls.needunwind_script("%s.%s" % (basekey, subkey))
             ))
+            def _find_subkey(key):
+                lastmatch = None
+                key = key.split('.')
+                for subkey in needunwind:
+                    subkey = subkey.split('.')[1:]
+                    if len(key) < len(subkey):
+                        continue
+                    if key == subkey:
+                        return (".".join([basekey] + subkey), None)
+                    if subkey == key[:len(subkey)]:
+                        lastmatch = (".".join([basekey] + subkey),
+                                     ".".join(key[len(subkey):]))
+                return lastmatch
+            def _to_json(key, value):
+                key = key.split('.')
+                result = value
+                while key:
+                    result = {key.pop(): result}
+                return result
+            for key, value in viewitems(values):
+                subkey = _find_subkey(key)
+                if subkey is None:
+                    # XXX TEST THIS
+                    req = and_(
+                        req,
+                        Script.data.contains(_to_json("%s.%s" % (basekey, key), value)),
+                    )
+                elif subkey[1] is None:
+                    # XXX TEST THIS
+                    req = and_(
+                        req,
+                        column(subkey[0].replace(".", "_").replace('-', '_')) == value,
+                    )
+                elif '.' in subkey[1]:
+                    # XXX TEST THIS
+                    firstpart, tail = subkey.split('.', 1)
+                    req = and_(
+                        req,
+                        column(subkey[0].replace(".", "_").replace('-', '_'))\
+                        .op('->')(firstpart).contains(_to_json(tail))
+                    )
+                else:
+                    req = and_(
+                        req,
+                        cls._searchstring_re(
+                            column(
+                                subkey[0].replace(".", "_").replace('-', '_')
+                            ).op('->>')(subkey[1]),
+                            value, neg=False,
+                        )
+                    )
+            return NmapFilter(script=[(
+                req,
+                [func.jsonb_array_elements(Script.data[subkey]).alias(subkey.replace('.', '_').replace('-', '_'))
+                 for subkey in needunwind],
+            )])
         return NmapFilter(script=[req])
+
+    @classmethod
+    def searchcert(cls, keytype=None):
+        if keytype is None:
+            return cls.searchscript(name="ssl-cert")
+        return cls.searchscript(name="ssl-cert",
+                                values={'pubkey': {'type': keytype}})
+
+    @classmethod
+    def searchsshkey(cls, keytype=None):
+        if keytype is not None:
+            utils.LOGGER.warning(
+                "Cannot use keytype with PostgreSQL backend. "
+                "Filter will return more results than expected"
+            )
+        return cls.searchscript(name="ssh-hostkey")
 
     @staticmethod
     def searchsvchostname(srv):
@@ -2485,6 +2710,13 @@ class PassiveFilter(Filter):
         self.location = location
         self.aut_sys = aut_sys
         self.uses_country = uses_country
+    @property
+    def all_queries(self):
+        return {
+            "main": self.main,
+            "location": self.location,
+            "aut_sys": self.aut_sys,
+        }
     def __nonzero__(self):
         return self.main is not None or self.location is not None \
             or self.aut_sys is not None or self.uses_country
@@ -2586,16 +2818,18 @@ class PostgresDBPassive(PostgresDB, DBPassive):
         ).cte("base")
         self.db.execute(delete(Passive).where(Passive.id.in_(base)))
 
-    def _get(self, flt, limit=None, skip=None, sort=None):
+    def get(self, flt, limit=None, skip=None, sort=None):
         """Queries the passive database with the provided filter "flt", and
 returns a generator.
 
         """
         req = flt.query(
-            select([Host.addr, Passive.sensor, Passive.count, Passive.firstseen,
-                    Passive.lastseen, Passive.info, Passive.port,
-                    Passive.recontype, Passive.source, Passive.targetval,
-                    Passive.value, Passive.moreinfo]).select_from(flt.select_from)
+            select(
+                [Host.addr, Passive.sensor, Passive.count, Passive.firstseen,
+                 Passive.lastseen, Passive.port, Passive.recontype,
+                 Passive.source, Passive.targetval, Passive.value,
+                 Passive.fullvalue, Passive.info, Passive.moreinfo]
+            ).select_from(flt.select_from)
         )
         for key, way in sort or []:
             req = req.order_by(key if way >= 0 else desc(key))
@@ -2603,12 +2837,16 @@ returns a generator.
             req = req.offset(skip)
         if limit is not None:
             req = req.limit(limit)
-        return self.db.execute(req)
+        for rec in self.db.execute(req):
+            rec = dict((key, value) for key, value in viewitems(rec)
+                       if value is not None)
+            rec["infos"] = dict(rec.pop("info"), **rec.pop("moreinfo"))
+            yield rec
 
     def get_one(self, flt, skip=None):
         """Queries the passive database with the provided filter "flt", and
 returns the first result, or None if no result exists."""
-        return self._get(flt, limit=1, skip=skip).fetchone()
+        return next(self.get(flt, limit=1, skip=skip))
 
     def insert_or_update(self, timestamp, spec, getinfos=None):
         if spec is None:
@@ -2959,10 +3197,16 @@ passive table."""
         ))
 
     @staticmethod
-    def searchcert():
+    def searchcert(keytype=None):
+        if keytype is None:
+            return PassiveFilter(main=(
+                (Passive.recontype == 'SSL_SERVER') &
+                (Passive.source == 'cert')
+            ))
         return PassiveFilter(main=(
             (Passive.recontype == 'SSL_SERVER') &
-            (Passive.source == 'cert')
+            (Passive.source == 'cert') &
+            (Passive.moreinfo.op('->>')('pubkeyalgo') == keytype + 'Encryption')
         ))
 
     @classmethod
@@ -2979,6 +3223,26 @@ passive table."""
             (Passive.recontype == 'SSL_SERVER') &
             (Passive.source == 'cert') &
             (cls._searchstring_re(Passive.moreinfo.op('->>')('issuer'), expr))
+        ))
+
+    @classmethod
+    def searchsshkey(cls, keytype=None):
+        if keytype is None:
+            return PassiveFilter(main=(
+                (Passive.recontype == 'SSH_SERVER_HOSTKEY') &
+                (Passive.source == 'SSHv2')
+            ))
+        return PassiveFilter(main=(
+            (Passive.recontype == 'SSH_SERVER_HOSTKEY') &
+            (Passive.source == 'SSHv2') &
+            (Passive.moreinfo.op('->>')('algo') == 'ssh-' + keytype)
+        ))
+
+    @classmethod
+    def searchtcpsrvbanner(cls, banner):
+        return PassiveFilter(main=(
+            (Passive.recontype == 'TCP_SERVER_BANNER') &
+            (cls._searchstring_re(Passive.value, banner))
         ))
 
     @classmethod
