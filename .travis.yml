@@ -58,6 +58,7 @@ addons:
 install:
   - source ./.travis/install_${DB}.sh
   - pip install $PIP_INSTALL_OPTIONS .
+  - pip install flake8
   - PYVERS=`python -c 'import sys;print("%d%d" % sys.version_info[:2])'`; if [ -f "requirements-$DB-$PYVERS.txt" ]; then  pip install $PIP_INSTALL_OPTIONS -r "requirements-$DB-$PYVERS.txt"; else pip install $PIP_INSTALL_OPTIONS -r "requirements-$DB.txt"; fi
   - test "$TRAVIS_PYTHON_VERSION" = 2.6 && pip install unittest2 || true
   - pip install $PIP_INSTALL_OPTIONS coverage codecov
@@ -77,7 +78,7 @@ before_script:
   - ivre ipdata --init < /dev/null
   - cat .travis/ivre.conf >> ~/.ivre.conf
   - echo "NMAP_SHARE_PATH = '`pwd`/usr/local/nmap/share/nmap'" >> ~/.ivre.conf
-  # install p0f & Bro (.tar files)
+  # install p0f, Bro & Nmap (.tar files)
   # for some reason, wget on travis-ci won't accept letsencrypt certificate
   - for archive in tools-travis-ivre bro-2.5.2_ubuntu-14.04 nmap-7.60_ubuntu-precise; do wget --no-check-certificate https://ivre.rocks/data/tests/${archive}.tar.bz2 -O - | tar jxf - ; done
   - export PATH="`pwd`/tools/bin:`pwd`/usr/local/bro/bin:`pwd`/usr/local/nmap/bin:$PATH"
@@ -105,7 +106,7 @@ before_script:
   - export BRO_SAMPLES=`pwd`/usr/local/bro/testing
   - ivre --version; echo; bro --version
 
-script: cd tests/ && coverage erase && coverage run --parallel-mode tests.py --coverage && coverage combine && coverage report
+script: (test "$TRAVIS_PYTHON_VERSION" = 2.6 || (flake8 setup.py && flake8 bin/ivre && flake8 ivre/ --ignore=E266,E731 && echo "flake8 OK (except E266,E731)")) && cd tests/ && coverage erase && coverage run --parallel-mode tests.py --coverage && coverage combine && coverage report
 
 after_success:
   - codecov
