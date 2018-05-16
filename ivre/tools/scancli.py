@@ -18,6 +18,14 @@
 
 
 from __future__ import print_function
+try:
+    import argparse
+except ImportError:
+    import optparse
+    USING_ARGPARSE = False
+else:
+    USING_ARGPARSE = True
+import json
 import os
 from xml.sax import saxutils
 try:
@@ -371,22 +379,20 @@ def displayhost_csv(fields, separator, nastr, dic, out=sys.stdout):
 
 
 def main():
-    try:
-        import argparse
+    if USING_ARGPARSE:
         parser = argparse.ArgumentParser(
             description='Access and query the active scans database.',
-            parents=[db.db.nmap.argparser])
-        USING_ARGPARSE = True
-    except ImportError:
-        import optparse
+            parents=[db.db.nmap.argparser],
+        )
+    else:
         parser = optparse.OptionParser(
-            description='Access and query the active scans database.')
+            description='Access and query the active scans database.',
+        )
         for args, kargs in db.db.nmap.argparser.args:
             parser.add_option(*args, **kargs)
         parser.parse_args_orig = parser.parse_args
         parser.parse_args = lambda: parser.parse_args_orig()[0]
         parser.add_argument = parser.add_option
-        USING_ARGPARSE = False
     parser.add_argument('--init', '--purgedb', action='store_true',
                         help='Purge or create and initialize the database.')
     parser.add_argument('--ensure-indexes', action='store_true',
@@ -515,11 +521,19 @@ def main():
                             if elt else "None"
                             for elt in entry['_id']
                         )
+                    elif isinstance(entry['_id'][0], dict):
+                        entry['_id'] = sep.join(
+                            json.dumps(elt, default=utils.serialize)
+                            for elt in entry['_id']
+                        )
                     else:
                         entry['_id'] = sep.join(str(elt)
                                                 for elt in entry['_id'])
                 else:
                     entry['_id'] = "None"
+            elif isinstance(entry['_id'], dict):
+                entry['_id'] = json.dumps(entry['_id'],
+                                          default=utils.serialize)
             print("%(_id)s: %(count)d" % entry)
         sys.exit(0)
     if args.sort is not None:
@@ -538,7 +552,6 @@ def main():
             out.write(str(val) + '\n')
         sys.exit(0)
     if args.json:
-        import json
 
         def displayfunction(x):
             if os.isatty(sys.stdout.fileno()):

@@ -1687,6 +1687,8 @@ performances).
         failed = 0
         if (version or 0) < 9:
             failed += self.__migrate_schema_8_9()
+        if (version or 0) < 10:
+            failed += self.__migrate_schema_9_10()
         return failed
 
     def __migrate_schema_8_9(self):
@@ -1720,8 +1722,41 @@ structured output for http-headers script.
                         )
         self.db.execute(
             update(Scan)
-            .where(Scan.id.notin_(failed))
+            .where(and_(Scan.schema_version == 8, Scan.id.notin_(failed)))
             .values(schema_version=9)
+        )
+        return len(failed)
+
+    def __migrate_schema_9_10(self):
+        """Converts a record from version 8 to version 9. Version 10 changes
+the field names of the structured output for s7-info script.
+
+        """
+        failed = []
+        req = (select([Scan.id, Script.port, Script.output, Script.data])
+               .select_from(join(join(Scan, Port), Script))
+               .where(and_(Scan.schema_version == 9,
+                           Script.name == "s7-info")))
+        for rec in self.db.execute(req):
+            if 's7-info' in rec.data:
+                try:
+                    data = xmlnmap.change_s7_info_keys(rec.data['s7-info'])
+                except Exception:
+                    utils.LOGGER.warning("Cannot migrate host %r", rec.id,
+                                         exc_info=True)
+                    failed.append(rec.id)
+                else:
+                    if data:
+                        self.db.execute(
+                            update(Script)
+                            .where(and_(Script.port == rec.port,
+                                        Script.name == "s7-info"))
+                            .values(data={"s7-info": data})
+                        )
+        self.db.execute(
+            update(Scan)
+            .where(and_(Scan.schema_version == 9, Scan.id.notin_(failed)))
+            .values(schema_version=10)
         )
         return len(failed)
 
@@ -2193,6 +2228,13 @@ structured output for http-headers script.
                                            Script.name == info)
             else:
                 field = self._topstructure(Script, [Script.name])
+        elif field.startswith('cert.'):
+            subfield = field[5:]
+            field = self._topstructure(
+                Script, [Script.data['ssl-cert'][subfield]],
+                and_(Script.name == 'ssl-cert',
+                     Script.data['ssl-cert'].has_key(subfield))
+            )  # noqa: W601 (BinaryExpression)
         elif field in ["category", "categories"]:
             field = self._topstructure(Category, [Category.name])
         elif field == "source":
@@ -2261,6 +2303,14 @@ structured output for http-headers script.
                 Script, [Script.data['modbus-discover'][subfield]],
                 and_(Script.name == 'modbus-discover',
                      Script.data['modbus-discover'].has_key(subfield)),
+                # noqa: W601 (BinaryExpression)
+            )
+        elif field.startswith('s7.'):
+            subfield = field[3:]
+            field = self._topstructure(
+                Script, [Script.data['s7-info'][subfield]],
+                and_(Script.name == 's7-info',
+                     Script.data['s7-info'].has_key(subfield)),
                 # noqa: W601 (BinaryExpression)
             )
         elif field == 'httphdr':
@@ -2656,9 +2706,11 @@ structured output for http-headers script.
             )
         return cls.searchscript(name="ssh-hostkey")
 
-    @staticmethod
-    def searchsvchostname(srv):
-        return NmapFilter(port=[(True, Port.service_hostname == srv)])
+    @classmethod
+    def searchsvchostname(cls, hostname):
+        return NmapFilter(port=[(
+            True, cls._searchstring_re(Port.service_hostname, hostname)
+        )])
 
     @staticmethod
     def searchwebmin():
@@ -2898,6 +2950,13 @@ class PostgresDBPassive(PostgresDB, DBPassive):
         "infos.domaintarget": Passive.moreinfo.op('->>')('domaintarget'),
         "infos.username": Passive.moreinfo.op('->>')('username'),
         "infos.password": Passive.moreinfo.op('->>')('password'),
+        "infos.service_name": Passive.moreinfo.op('->>')('service_name'),
+        "infos.service_ostype": Passive.moreinfo.op('->>')('service_ostype'),
+        "infos.service_product": Passive.moreinfo.op('->>')('service_product'),
+        "infos.service_version": Passive.moreinfo.op('->>')('service_version'),
+        "infos.service_extrainfo": Passive.moreinfo.op('->>')(
+            'service_extrainfo'
+        ),
         "port": Passive.port,
         "recontype": Passive.recontype,
         "source": Passive.source,
@@ -3364,6 +3423,75 @@ passive table."""
     def searchsensor(cls, sensor, neg=False):
         return PassiveFilter(
             main=(cls._searchstring_re(Passive.sensor, sensor, neg=neg)),
+        )
+
+    @staticmethod
+    def searchport(port, protocol='tcp', state='open', neg=False):
+        """Filters (if `neg` == True, filters out) records on the specified
+        protocol/port.
+
+        """
+        if protocol != 'tcp':
+            raise ValueError("Protocols other than TCP are not supported "
+                             "in passive")
+        if state != 'open':
+            raise ValueError("Only open ports can be found in passive")
+        return PassiveFilter(main=(Passive.port != port)
+                             if neg else (Passive.port == port))
+
+    @classmethod
+    def searchservice(cls, srv, port=None, protocol=None):
+        """Search a port with a particular service."""
+        flt = [cls._searchstring_re(Passive.moreinfo.op('->>')('service_name'),
+                                    srv)]
+        if port is not None:
+            flt.append(Passive.port == port)
+        if protocol is not None and protocol != 'tcp':
+            raise ValueError("Protocols other than TCP are not supported "
+                             "in passive")
+        return PassiveFilter(main=and_(*flt))
+
+    @classmethod
+    def searchproduct(cls, product, version=None, service=None, port=None,
+                      protocol=None):
+        """Search a port with a particular `product`. It is (much)
+        better to provide the `service` name and/or `port` number
+        since those fields are indexed.
+
+        """
+        flt = [
+            cls._searchstring_re(Passive.moreinfo.op('->>')('service_product'),
+                                 product)
+        ]
+        if version is not None:
+            flt.append(
+                cls._searchstring_re(
+                    Passive.moreinfo.op('->>')('service_version'), version,
+                )
+            )
+        if service is not None:
+            flt.append(
+                cls._searchstring_re(
+                    Passive.moreinfo.op('->>')('service_name'), service,
+                )
+            )
+        if port is not None:
+            flt.append(Passive.port == port)
+        if protocol is not None:
+            if protocol != 'tcp':
+                raise ValueError("Protocols other than TCP are not supported "
+                                 "in passive")
+        return PassiveFilter(main=and_(*flt))
+
+    @classmethod
+    def searchsvchostname(cls, hostname):
+        return PassiveFilter(
+            main=cls._searchstring_re(
+                Passive.moreinfo.op('->>')(
+                    'service_hostname'
+                ),
+                hostname,
+            )
         )
 
     @staticmethod

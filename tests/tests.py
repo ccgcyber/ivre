@@ -344,8 +344,15 @@ class IvreTests(unittest.TestCase):
         for line in out.decode().split('\n'):
             if not line:
                 continue
-            line = line.split(": ", 1)
-            listval.append({'_id': line[0], 'count': int(line[1])})
+            value, count = line.rsplit(": ", 1)
+            for function in [int, float, json.loads]:
+                try:
+                    value = function(value)
+                except ValueError:
+                    continue
+                else:
+                    break
+            listval.append({'_id': value, 'count': int(count)})
         self.check_value(name, self._sort_top_values(listval),
                          check=self.assertItemsEqual)
 
@@ -363,8 +370,11 @@ class IvreTests(unittest.TestCase):
 
     def check_top_value(self, name, field, count=10):
         for method in ['api', 'cli', 'cgi']:
+            specific_name = "%s_%s" % (name, method)
+            if name in self.results and specific_name not in self.results:
+                specific_name = name
             getattr(self, "_check_top_value_%s" % method)(
-                "%s_%s" % (name, method), field, count=count,
+                specific_name, field, count=count,
             )
 
     def check_count_value_api(self, name_or_value, flt):
@@ -1234,6 +1244,11 @@ which `predicate()` is True, given `webflt`.
             ["ivre", "scancli", "--domain", "/^pttsh.*tw$/i",
              "--distinct", "hostnames.name"]
         )
+        self.check_top_value("nmap_top_s7_module_name", "s7.module_name")
+        self.check_top_value("nmap_top_s7_plant", "s7.plant")
+        self.check_top_value("nmap_top_isotsap_product", "product:iso-tsap")
+        self.check_top_value("nmap_top_cert_issuer", "cert.issuer")
+        self.check_top_value("nmap_top_cert_subject", "cert.subject")
         self._check_top_value_cli("nmap_top_filename", "file")
         self._check_top_value_cli("nmap_top_filename", "file.filename")
         self._check_top_value_cli("nmap_top_anonftp_filename", "file:ftp-anon")
@@ -1570,6 +1585,93 @@ which `predicate()` is True, given `webflt`.
                 )()
             )
             self.check_value("passive_%sauth_count" % auth_type, count)
+
+        for port in [22, 143]:
+            res, out, _ = RUN(["ivre", "ipinfo", "--count", "--port",
+                               str(port)])
+            self.assertEqual(res, 0)
+            count1 = int(out)
+            self.check_value("passive_count_port_%d" % port, count1)
+            flt = ivre.db.db.passive.searchport(port)
+            count2 = ivre.db.db.passive.count(flt)
+            self.assertEqual(count1, count2)
+            for res in ivre.db.db.passive.get(flt):
+                self.assertTrue(res['port'] == port)
+
+        for service in ['ssh', 'imap', 'http']:
+            res, out, _ = RUN(["ivre", "ipinfo", "--count", "--service",
+                               service])
+            self.assertEqual(res, 0)
+            count1 = int(out)
+            self.check_value("passive_count_%s" % service, count1)
+            flt = ivre.db.db.passive.searchservice(service)
+            count2 = ivre.db.db.passive.count(flt)
+            self.assertEqual(count1, count2)
+            for res in ivre.db.db.passive.get(flt):
+                self.assertTrue(res['infos']['service_name'] == service)
+
+        for service, port in [('ssh', 22), ('ssh', 23), ('imap', 143),
+                              ('imap', 110)]:
+            res, out, _ = RUN(["ivre", "ipinfo", "--count", "--service",
+                               service, "--port", str(port)])
+            self.assertEqual(res, 0)
+            count1 = int(out)
+            self.check_value("passive_count_%s_port_%d" % (service, port),
+                             count1)
+            flt = ivre.db.db.passive.searchservice(service, port=port)
+            count2 = ivre.db.db.passive.count(flt)
+            self.assertEqual(count1, count2)
+            for res in ivre.db.db.passive.get(flt):
+                self.assertTrue(res['port'] == port)
+                self.assertTrue(res['infos']['service_name'] == service)
+
+        for service, product in [('ssh', 'Cisco SSH'),
+                                 ('http', 'Apache httpd'),
+                                 ('imap', 'Microsoft Exchange imapd')]:
+            flt = ivre.db.db.passive.searchproduct(product, service=service)
+            count = ivre.db.db.passive.count(flt)
+            self.check_value(
+                "passive_count_%s_%s" % (service, product.replace(' ', '')),
+                count,
+            )
+            for res in ivre.db.db.passive.get(flt):
+                self.assertTrue(res['infos']['service_name'] == service)
+                self.assertTrue(res['infos']['service_product'] == product)
+
+        for service, product, version in [
+                ('ssh', 'Cisco SSH', "1.25"),
+                ('ssh', 'OpenSSH', '3.1p1')
+        ]:
+            flt = ivre.db.db.passive.searchproduct(product, service=service,
+                                                   version=version)
+            count = ivre.db.db.passive.count(flt)
+            self.check_value(
+                "passive_count_%s_%s_%s" % (service, product.replace(' ', ''),
+                                            version.replace('.', '_')),
+                count,
+            )
+            for res in ivre.db.db.passive.get(flt):
+                self.assertTrue(res['infos']['service_name'] == service)
+                self.assertTrue(res['infos']['service_product'] == product)
+                self.assertTrue(res['infos']['service_version'] == version)
+
+        for service, product, port in [
+                ('ssh', 'Cisco SSH', 22),
+                ('ssh', 'OpenSSH', 22)
+        ]:
+            flt = ivre.db.db.passive.searchproduct(product, service=service,
+                                                   port=port)
+            count = ivre.db.db.passive.count(flt)
+            self.check_value(
+                "passive_count_%s_%s_port_%d" % (service,
+                                                 product.replace(' ', ''),
+                                                 port),
+                count,
+            )
+            for res in ivre.db.db.passive.get(flt):
+                self.assertTrue(res['port'] == port)
+                self.assertTrue(res['infos']['service_name'] == service)
+                self.assertTrue(res['infos']['service_product'] == product)
 
         # Top values
         for distinct in [True, False]:

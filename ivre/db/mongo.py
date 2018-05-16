@@ -587,6 +587,7 @@ class MongoDBNmap(MongoDB, DBNmap):
                 6: (7, self.migrate_schema_hosts_6_7),
                 7: (8, self.migrate_schema_hosts_7_8),
                 8: (9, self.migrate_schema_hosts_8_9),
+                9: (10, self.migrate_schema_hosts_9_10),
             },
         }
         self.schema_migrations[self.colname_oldhosts] = self.schema_migrations[
@@ -911,6 +912,25 @@ creates the default indexes."""
                         if data is not None:
                             script['http-headers'] = data
                             updated = True
+        if updated:
+            update["$set"]["ports"] = doc['ports']
+        return update
+
+    @staticmethod
+    def migrate_schema_hosts_9_10(doc):
+        """Converts a record from version 8 to version 9. Version 10 changes
+the field names of the structured output for s7-info script.
+
+        """
+        assert doc["schema_version"] == 9
+        update = {"$set": {"schema_version": 10}}
+        updated = False
+        for port in doc.get('ports', []):
+            for script in port.get('scripts', []):
+                if script['id'] == "s7-info":
+                    if 's7-info' in script:
+                        xmlnmap.change_s7_info_keys(script['s7-info'])
+                        updated = True
         if updated:
             update["$set"]["ports"] = doc['ports']
         return update
@@ -1602,8 +1622,8 @@ have no effect if it is not expected)."""
                                 values={'type': 'ssh-%s' % keytype})
 
     @staticmethod
-    def searchsvchostname(srv):
-        return {'ports.service_hostname': srv}
+    def searchsvchostname(hostname):
+        return {'ports.service_hostname': hostname}
 
     @staticmethod
     def searchwebmin():
@@ -2956,6 +2976,55 @@ setting values according to the keyword arguments.
                 return {'sensor': {'$not': sensor}}
             return {'sensor': {'$ne': sensor}}
         return {'sensor': sensor}
+
+    @staticmethod
+    def searchport(port, protocol='tcp', state='open', neg=False):
+        """Filters (if `neg` == True, filters out) records on the specified
+        protocol/port.
+
+        """
+        if protocol != 'tcp':
+            raise ValueError("Protocols other than TCP are not supported "
+                             "in passive")
+        if state != 'open':
+            raise ValueError("Only open ports can be found in passive")
+        return {'port': {'$ne': port} if neg else port}
+
+    @staticmethod
+    def searchservice(srv, port=None, protocol=None):
+        """Search a port with a particular service."""
+        flt = {'infos.service_name': srv}
+        if port is not None:
+            flt['port'] = port
+        if protocol is not None and protocol != 'tcp':
+            raise ValueError("Protocols other than TCP are not supported "
+                             "in passive")
+        return flt
+
+    @staticmethod
+    def searchproduct(product, version=None, service=None, port=None,
+                      protocol=None):
+        """Search a port with a particular `product`. It is (much)
+        better to provide the `service` name and/or `port` number
+        since those fields are indexed.
+
+        """
+        flt = {'infos.service_product': product}
+        if version is not None:
+            flt['infos.service_version'] = version
+        if service is not None:
+            flt['infos.service_name'] = service
+        if port is not None:
+            flt['port'] = port
+        if protocol is not None:
+            if protocol != 'tcp':
+                raise ValueError("Protocols other than TCP are not supported "
+                                 "in passive")
+        return flt
+
+    @staticmethod
+    def searchsvchostname(hostname):
+        return {'infos.service_hostname': hostname}
 
     @staticmethod
     def searchuseragent(useragent):

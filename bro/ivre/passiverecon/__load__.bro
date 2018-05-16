@@ -122,7 +122,8 @@ export {
     const TCP_CLIENT_BANNER_IGNORE: pattern = /^(\x16\x03[\x00\x01\x02\x03]..\x01...\x03[\x00\x01\x02\x03]|...?\x01[\x00\x03][\x00\x01\x02\x03\x04]|\x16\xfe[\xff\xfd]\x00\x00\x00\x00\x00\x00\x00...\x01...........\xfe[\xff\xfd]|[[:space:]]*(OPTIONS|GET|HEAD|POST|PUT|DELETE|TRACE|CONNECT|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|VERSION-CONTROL|REPORT|CHECKOUT|CHECKIN|UNCHECKOUT|MKWORKSPACE|UPDATE|LABEL|MERGE|BASELINE-CONTROL|MKACTIVITY|ORDERPATCH|ACL|PATCH|SEARCH|BCOPY|BDELETE|BMOVE|BPROPFIND|BPROPPATCH|NOTIFY|POLL|SUBSCRIBE|UNSUBSCRIBE|X-MS-ENUMATTS|RPC_OUT_DATA|RPC_IN_DATA)[[:space:]]*)/;
 
     # Ignore HTTP server responses (from scripts/base/protocols/http/dpd.sig)
-    const TCP_SERVER_BANNER_IGNORE: pattern = /^HTTP\/[0-9]/;
+    # Ignore thttpd UNKNOWN timeout answer
+    const TCP_SERVER_BANNER_IGNORE: pattern = /^(HTTP\/[0-9]|UNKNOWN 408)/;
 }
 
 event bro_init() {
@@ -393,7 +394,8 @@ event pop3_request(c: connection, is_orig: bool, command: string, arg: string) {
 }
 
 event tcp_contents(c: connection, is_orig: bool, seq: count, contents: string) {
-    if (seq == 1) {
+    if (seq == 1 && "ftp-data" !in c$service && "gridftp-data" !in c$service &&
+        "irc-dcc-data" !in c$service) {
         if (is_orig && c$resp$size == 0 && c$history == TCP_BANNER_HISTORY &&
             ! (TCP_CLIENT_BANNER_IGNORE in contents))
             Log::write(LOG, [$ts=c$start_time,
