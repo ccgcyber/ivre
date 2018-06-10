@@ -23,7 +23,6 @@ databases.
 """
 
 
-from bisect import bisect_left
 import codecs
 from collections import namedtuple
 import csv
@@ -31,63 +30,26 @@ import datetime
 from functools import reduce
 import json
 import re
-import socket
-import struct
 import time
 
 
 from builtins import int, range
 from future.utils import viewitems, viewvalues
 from past.builtins import basestring
-from sqlalchemy import event, create_engine, desc, func, text, column, \
-    delete, exists, insert, join, select, union, update, null, and_, not_, \
-    or_, Column, ForeignKey, Index, Table, ARRAY, Boolean, DateTime, Float, \
-    Integer, LargeBinary, String, Text, tuple_
+from sqlalchemy import create_engine, desc, func, text, column, delete, \
+    exists, insert, join, select, update, and_, not_, or_, Column, \
+    ForeignKey, Index, Table, ARRAY, Boolean, DateTime, Float, Integer, \
+    LargeBinary, String, Text, tuple_
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.types import UserDefinedType
 from sqlalchemy.ext.declarative import declarative_base
 
 
-from ivre.db import DB, DBFlow, DBData, DBNmap, DBPassive
+from ivre.db import DB, DBFlow, DBNmap, DBPassive
 from ivre import config, utils, xmlnmap
 
 
 Base = declarative_base()
-
-
-class Context(Base):
-    __tablename__ = "context"
-    id = Column(Integer, primary_key=True)
-    name = Column(String(32))
-    __table_args__ = (
-        Index('ix_context_name', 'name', unique=True),
-    )
-
-
-def _after_context_create(target, connection, **_):
-    connection.execute(insert(Context).values(id=0))
-
-
-event.listen(Context.__table__, "after_create", _after_context_create)
-
-
-class Host(Base):
-    __tablename__ = "host"
-    id = Column(Integer, primary_key=True)
-    context = Column(Integer, ForeignKey('context.id', ondelete='RESTRICT'))
-    addr = Column(postgresql.INET)
-    firstseen = Column(DateTime)
-    lastseen = Column(DateTime)
-    __table_args__ = (
-        Index('ix_host_addr_context', 'addr', 'context', unique=True),
-    )
-
-
-def _after_host_create(target, connection, **_):
-    connection.execute(insert(Host).values(id=0, context=0))
-
-
-event.listen(Host.__table__, "after_create", _after_host_create)
 
 
 class Flow(Base):
@@ -95,8 +57,8 @@ class Flow(Base):
     id = Column(Integer, primary_key=True)
     proto = Column(String(32), index=True)
     dport = Column(Integer, index=True)
-    src = Column(Integer, ForeignKey('host.id', ondelete='RESTRICT'))
-    dst = Column(Integer, ForeignKey('host.id', ondelete='RESTRICT'))
+    src = Column(postgresql.INET)
+    dst = Column(postgresql.INET)
     firstseen = Column(DateTime)
     lastseen = Column(DateTime)
     scpkts = Column(Integer)
@@ -167,48 +129,6 @@ the original line.
         return self
 
 
-class GeoIPCSVLocationFile(CSVFile):
-    @staticmethod
-    def fixline(line):
-        return line[:5] + ["%s,%s" % tuple(line[5:7])] + line[7:]
-
-
-class GeoIPCSVLocationRangeFile(CSVFile):
-    @staticmethod
-    def fixline(line):
-        for i in range(2):
-            line[i] = utils.int2ip(int(line[i]))
-        return line
-
-
-class GeoIPCSVASFile(CSVFile):
-    @staticmethod
-    def fixline(line):
-        line = line[2].split(' ', 1)
-        return [line[0][2:], '' if len(line) == 1 else line[1]]
-
-
-class GeoIPCSVASRangeFile(CSVFile):
-    @staticmethod
-    def fixline(line):
-        for i in range(2):
-            line[i] = utils.int2ip(int(line[i]))
-        line[2] = line[2].split(' ', 1)[0][2:]
-        return line
-
-
-class Country(Base):
-    __tablename__ = "country"
-    code = Column(String(2), primary_key=True)
-    name = Column(String(64), index=True)
-
-
-class AS(Base):
-    __tablename__ = "aut_sys"
-    num = Column(Integer, primary_key=True)
-    name = Column(String(128), index=True)
-
-
 class Point(UserDefinedType):
 
     def get_col_spec(self):
@@ -232,45 +152,12 @@ class Point(UserDefinedType):
         return process
 
 
-class Location(Base):
-    __tablename__ = "location"
-    id = Column(Integer, primary_key=True)
-    country_code = Column(String(2), ForeignKey('country.code',
-                                                ondelete='CASCADE'))
-    city = Column(String(64))
-    coordinates = Column(Point)  # , index=True
-    area_code = Column(Integer)
-    metro_code = Column(Integer)
-    postal_code = Column(String(16))
-    region_code = Column(String(2), index=True)
-    __table_args__ = (
-        Index('ix_location_country_city', 'country_code', 'city'),
-    )
-
-
-class AS_Range(Base):
-    __tablename__ = "as_range"
-    id = Column(Integer, primary_key=True)
-    aut_sys = Column(Integer, ForeignKey('aut_sys.num', ondelete='CASCADE'))
-    start = Column(postgresql.INET, index=True)
-    stop = Column(postgresql.INET)
-
-
-class Location_Range(Base):
-    __tablename__ = "location_range"
-    id = Column(Integer, primary_key=True)
-    location_id = Column(Integer, ForeignKey('location.id',
-                                             ondelete='CASCADE'))
-    start = Column(postgresql.INET, index=True)
-    stop = Column(postgresql.INET)
-
-
 # Nmap
 
 class ScanCSVFile(CSVFile):
 
-    def __init__(self, hostgen, get_context, table, merge):
-        self.get_context = get_context
+    def __init__(self, hostgen, convert_ip, table, merge):
+        self.convert_ip = convert_ip
         self.table = table
         self.inp = hostgen
         self.merge = merge
@@ -279,9 +166,7 @@ class ScanCSVFile(CSVFile):
     def fixline(self, line):
         for field in ["cpes", "extraports", "openports", "os", "traces"]:
             line.pop(field, None)
-        line["context"] = self.get_context(line['addr'],
-                                           source=line.get('source'))
-        line["addr"] = PostgresDB.convert_ip(line['addr'])
+        line["addr"] = self.convert_ip(line['addr'])
         scanfileid = line.pop('scanid')
         if isinstance(scanfileid, basestring):
             scanfileid = [scanfileid]
@@ -460,9 +345,9 @@ class Scan(Base):
 class PassiveCSVFile(CSVFile):
     info_fields = set(["distance", "signature", "version"])
 
-    def __init__(self, siggen, get_context, table, limit=None, getinfos=None,
+    def __init__(self, siggen, convert_ip, table, limit=None, getinfos=None,
                  separated_timestamps=True):
-        self.get_context = get_context
+        self.convert_ip = convert_ip
         self.table = table
         self.inp = siggen
         self.fdesc = None
@@ -501,12 +386,9 @@ class PassiveCSVFile(CSVFile):
             except KeyError:
                 pass
         if "addr" in line:
-            addr = line["addr"]
-            line["context"] = self.get_context(addr, sensor=line.get('sensor'))
-            line["addr"] = PostgresDB.convert_ip(addr)
+            line["addr"] = self.convert_ip(line["addr"])
         else:
             line["addr"] = None
-            line["context"] = None
         line.setdefault("count", 1)
         line.setdefault("port", 0)
         for key in ["sensor", "value", "source", "targetval"]:
@@ -539,7 +421,7 @@ class PassiveCSVFile(CSVFile):
 class Passive(Base):
     __tablename__ = "passive"
     id = Column(Integer, primary_key=True)
-    host = Column(Integer, ForeignKey('host.id', ondelete='RESTRICT'))
+    addr = Column(postgresql.INET)
     sensor = Column(String(64))
     count = Column(Integer)
     firstseen = Column(DateTime)
@@ -556,58 +438,14 @@ class Passive(Base):
     # unicity on insertion (the unicity is guaranteed by the value)
     # for performance reasons
     __table_args__ = (
-        Index('ix_passive_record', 'host', 'sensor', 'recontype', 'port',
+        Index('ix_passive_record', 'addr', 'sensor', 'recontype', 'port',
               'source', 'value', 'targetval', 'info', unique=True),
     )
 
 
 class PostgresDB(DB):
     tables = []
-    required_tables = []
-    shared_tables = []
     fields = {}
-    context_names = [
-        "Current-Net",
-        "Public",
-        "Private",
-        "Public",
-        "CGN",
-        "Public",
-        "Loopback",
-        "Public",
-        "Link-Local",
-        "Public",
-        "Private",
-        "Public",
-        "IPv6-to-IPv4",
-        "Public",
-        "Private",
-        "Public",
-        "Multicast",
-        "Reserved",
-        "Broadcast",
-    ]
-    context_last_ips = [
-        utils.ip2int("0.255.255.255"),
-        utils.ip2int("9.255.255.255"),
-        utils.ip2int("10.255.255.255"),
-        utils.ip2int("100.63.255.255"),
-        utils.ip2int("100.127.255.255"),
-        utils.ip2int("126.255.255.255"),
-        utils.ip2int("127.255.255.255"),
-        utils.ip2int("169.253.255.255"),
-        utils.ip2int("169.254.255.255"),
-        utils.ip2int("172.15.255.255"),
-        utils.ip2int("172.31.255.255"),
-        utils.ip2int("192.88.98.255"),
-        utils.ip2int("192.88.99.255"),
-        utils.ip2int("192.167.255.255"),
-        utils.ip2int("192.168.255.255"),
-        utils.ip2int("223.255.255.255"),
-        utils.ip2int("239.255.255.255"),
-        utils.ip2int("255.255.255.254"),
-        utils.ip2int("255.255.255.255"),
-    ]
 
     def __init__(self, url):
         self.dburl = url
@@ -625,36 +463,18 @@ class PostgresDB(DB):
     def drop(self):
         for table in reversed(self.tables):
             table.__table__.drop(bind=self.db, checkfirst=True)
-        for table, othercols in self.shared_tables:
-            if table.__table__.exists(bind=self.db):
-                basevals = [select([col.distinct()]) for col in othercols
-                            if col.table.exists(bind=self.db)]
-                if basevals:
-                    base = union(*(basevals)).cte("base")
-                    self.db.execute(delete(table).where(table.id.notin_(base)))
-                else:
-                    table.__table__.drop(bind=self.db, checkfirst=True)
 
     def create(self):
-        for table in self.required_tables:
-            table.__table__.create(bind=self.db, checkfirst=True)
-        for table, _ in self.shared_tables[::-1]:
-            table.__table__.create(bind=self.db, checkfirst=True)
         for table in self.tables:
             table.__table__.create(bind=self.db, checkfirst=True)
-        # Make sur we always have the 0 record
-        try:
-            _after_context_create(None, self.db)
-        except Exception:
-            pass
-        try:
-            _after_host_create(None, self.db)
-        except Exception:
-            pass
 
     def init(self):
         self.drop()
         self.create()
+
+    @staticmethod
+    def convert_ip(addr):
+        return utils.force_int2ip(addr)
 
     @staticmethod
     def to_binary(data):
@@ -701,37 +521,6 @@ class PostgresDB(DB):
             if outqueries:
                 result[queryname] = outqueries
         return json.dumps(result)
-
-    def store_host_context(self, addr, context, firstseen, lastseen):
-        insrt = postgresql.insert(Context)
-        ctxt = self.db.execute(
-            insrt.values(name=context)
-            .on_conflict_do_update(
-                index_elements=['name'],
-                set_={'name': insrt.excluded.name}
-            )
-            .returning(Context.id)
-        ).fetchone()[0]
-        insrt = postgresql.insert(Host)
-        return self.db.execute(
-            insrt.values(context=ctxt,
-                         addr=addr,
-                         firstseen=firstseen,
-                         lastseen=lastseen)
-            .on_conflict_do_update(
-                index_elements=['addr', 'context'],
-                set_={
-                    'firstseen': func.least(
-                        Host.firstseen,
-                        insrt.excluded.firstseen,
-                    ),
-                    'lastseen': func.greatest(
-                        Host.lastseen,
-                        insrt.excluded.lastseen,
-                    )},
-            )
-            .returning(Host.id)
-        ).fetchone()[0]
 
     def create_indexes(self):
         raise NotImplementedError()
@@ -784,16 +573,6 @@ class PostgresDB(DB):
                     if value is not None)
 
     @classmethod
-    def default_context(cls, addr):
-        # default case:
-        try:
-            addr = utils.ip2int(addr)
-        except (TypeError, socket.error):
-            # FIXME no IPv6 support
-            return "Public"
-        return cls.context_names[bisect_left(cls.context_last_ips, addr)]
-
-    @classmethod
     def searchobjectid(cls, oid, neg=False):
         """Filters records by their ObjectID.  `oid` can be a single or many
         (as a list or any iterable) object ID(s), specified as strings
@@ -809,17 +588,6 @@ class PostgresDB(DB):
     @staticmethod
     def _searchobjectid(oid, neg=False):
         raise NotImplementedError
-
-    @classmethod
-    def searchhost(cls, addr, neg=False):
-        """Filters (if `neg` == True, filters out) one particular host
-        (IP address).
-
-        """
-
-        if neg:
-            return Host.addr != cls.convert_ip(addr)
-        return Host.addr == cls.convert_ip(addr)
 
     @staticmethod
     def _distinct_req(field, flt):
@@ -849,20 +617,6 @@ field.
         if limit is not None:
             req = req.limit(limit)
         return (next(iter(viewvalues(res))) for res in self.db.execute(req))
-
-    @classmethod
-    def searchhosts(cls, hosts, neg=False):
-        hosts = [cls.convert_ip(host) for host in hosts]
-        if neg:
-            return Host.addr.notin_(hosts)
-        return Host.addr.in_(hosts)
-
-    @classmethod
-    def searchrange(cls, start, stop, neg=False):
-        start, stop = cls.convert_ip(start), cls.convert_ip(stop)
-        if neg:
-            return or_(Host.addr < start, Host.addr > stop)
-        return and_(Host.addr >= start, Host.addr <= stop)
 
     @staticmethod
     def _flt_and(flt1, flt2):
@@ -991,8 +745,6 @@ class BulkInsert(object):
 
 class PostgresDBFlow(PostgresDB, DBFlow):
     tables = [Flow]
-    shared_tables = [(Host, [Passive.host]),
-                     (Context, [Host.context])]
 
     def __init__(self, url):
         PostgresDB.__init__(self, url)
@@ -1008,7 +760,6 @@ class PostgresDBFlow(PostgresDB, DBFlow):
 
     @classmethod
     def add_host(cls, labels=None, keys=None, time=True):
-        # q = postgresql.insert(Host)
         raise NotImplementedError()
 
     def add_flow_metadata(self, labels, linktype, keys, flow_keys,
@@ -1051,181 +802,6 @@ class PostgresDBFlow(PostgresDB, DBFlow):
 
     def cleanup_flows(self):
         raise NotImplementedError()
-
-
-# Neo4jDBFlow.LABEL2NAME.update({
-#     "Host": ["addr"],
-#     "Flow": [Neo4jDBFlow._flow2name],
-# })
-
-
-class PostgresDBData(PostgresDB, DBData):
-    tables = [Country, Location, Location_Range, AS, AS_Range]
-
-    def __init__(self, url):
-        PostgresDB.__init__(self, url)
-        DBData.__init__(self)
-
-    def feed_geoip_country(self, *_, **__):
-        "Country database has been dropped in favor of Location/City"
-        pass
-
-    def feed_geoip_city(self, fname, feedipdata=None,
-                        createipdata=False):
-        utils.LOGGER.debug("START IMPORT: %s", fname)
-        with GeoIPCSVLocationRangeFile(fname, skip=2) as fdesc:
-            self.copy_from(
-                fdesc, Location_Range.__tablename__, null='',
-                columns=['start', 'stop', 'location_id'],
-            )
-        utils.LOGGER.debug("IMPORT DONE (%s)", fname)
-
-    def feed_country_codes(self, fname):
-        utils.LOGGER.debug("START IMPORT: %s", fname)
-        with CSVFile(fname) as fdesc:
-            self.copy_from(fdesc, Country.__tablename__, null='')
-        # Missing from iso3166.csv file but used in GeoIPCity-Location.csv
-        self.db.execute(insert(Country).values(
-            code="AN",
-            name="Netherlands Antilles",
-        ))
-        utils.LOGGER.debug("IMPORT DONE (%s)", fname)
-
-    def feed_city_location(self, fname):
-        utils.LOGGER.debug("START IMPORT: %s", fname)
-        with GeoIPCSVLocationFile(fname, skip=2) as fdesc:
-            self.copy_from(
-                fdesc, Location.__tablename__, null='',
-                columns=['id', 'country_code', 'region_code', 'city',
-                         'postal_code', 'coordinates', 'metro_code',
-                         'area_code'],
-            )
-        utils.LOGGER.debug("IMPORT DONE (%s)", fname)
-
-    def feed_geoip_asnum(self, fname, feedipdata=None,
-                         createipdata=False):
-        utils.LOGGER.debug("START IMPORT: %s", fname)
-        with GeoIPCSVASFile(fname) as fdesc:
-            tmp = self.create_tmp_table(AS)
-            self.copy_from(fdesc, tmp.name, null='')
-        self.db.execute(insert(AS).from_select(['num', 'name'],
-                                               select([tmp]).distinct("num")))
-        with GeoIPCSVASRangeFile(fname) as fdesc:
-            self.copy_from(
-                fdesc, AS_Range.__tablename__, null='',
-                columns=['start', 'stop', 'aut_sys'],
-            )
-        utils.LOGGER.debug("IMPORT DONE (%s)", fname)
-
-    def country_byip(self, addr):
-        try:
-            addr = utils.int2ip(addr)
-        except (TypeError, struct.error):
-            pass
-        data_range = (select([Location_Range.stop, Location_Range.location_id])
-                      .where(Location_Range.start <= addr)
-                      .order_by(Location_Range.start.desc())
-                      .limit(1)
-                      .cte("data_range"))
-        location = (select([Location.country_code])
-                    .where(Location.id == select([data_range.c.location_id]))
-                    .limit(1)
-                    .cte("location"))
-        data = self.db.execute(
-            select([data_range.c.stop, location.c.country_code, Country.name])
-            .where(location.c.country_code == Country.code)
-        ).fetchone()
-        if data and utils.ip2int(addr) <= utils.ip2int(data[0]):
-            return self.fmt_results(
-                ['country_code', 'country_name'],
-                data[1:],
-            )
-
-    def location_byip(self, addr):
-        try:
-            addr = utils.int2ip(addr)
-        except (TypeError, struct.error):
-            pass
-        data_range = (select([Location_Range.stop, Location_Range.location_id])
-                      .where(Location_Range.start <= addr)
-                      .order_by(Location_Range.start.desc())
-                      .limit(1)
-                      .cte("data_range"))
-        location = (select([Location])
-                    .where(Location.id == select([data_range.c.location_id]))
-                    .limit(1)
-                    .cte("location"))
-        data = self.db.execute(
-            select([data_range.c.stop, location.c.coordinates,
-                    location.c.country_code, Country.name, location.c.city,
-                    location.c.area_code, location.c.metro_code,
-                    location.c.postal_code, location.c.region_code])
-            .where(location.c.country_code == Country.code)
-        ).fetchone()
-        if data and utils.ip2int(addr) <= utils.ip2int(data[0]):
-            return self.fmt_results(
-                ['coordinates', 'country_code', 'country_name', 'city',
-                 'area_code', 'metro_code', 'postal_code', 'region_code'],
-                data[1:],
-            )
-
-    def as_byip(self, addr):
-        try:
-            addr = utils.int2ip(addr)
-        except (TypeError, struct.error):
-            pass
-        data_range = (select([AS_Range.stop, AS_Range.aut_sys])
-                      .where(AS_Range.start <= addr)
-                      .order_by(AS_Range.start.desc())
-                      .limit(1)
-                      .cte("data_range"))
-        data = self.db.execute(
-            select([data_range.c.stop, data_range.c.aut_sys, AS.name])
-            .where(AS.num == select([data_range.c.aut_sys]))
-        ).fetchone()
-        if data and utils.ip2int(addr) <= utils.ip2int(data[0]):
-            return self.fmt_results(
-                ['as_num', 'as_name'],
-                data[1:],
-            )
-
-    def ipranges_bycountry(self, code):
-        """Returns a generator of every (start, stop) IP ranges for a country
-given its ISO-3166-1 "alpha-2" code or its name."""
-        if len(code) != 2:
-            return self.db.execute(
-                select([Location_Range.start, Location_Range.stop])
-                .select_from(join(join(Location, Location_Range), Country))
-                .where(Country.name == code)
-            )
-        return self.db.execute(
-            select([Location_Range.start, Location_Range.stop])
-            .select_from(join(Location, Location_Range))
-            .where(Location.country_code == code)
-        )
-
-    def ipranges_byas(self, asnum):
-        """Returns a generator of every (start, stop) IP ranges for an
-Autonomous System given its number or its name.
-
-        """
-        if isinstance(asnum, basestring):
-            try:
-                if asnum.startswith('AS'):
-                    asnum = int(asnum[2:])
-                else:
-                    asnum = int(asnum)
-            except ValueError:
-                # lookup by name
-                return self.db.execute(
-                    select([AS_Range.start, AS_Range.stop])
-                    .select_from(join(AS, AS_Range))
-                    .where(AS.name == asnum)
-                )
-        return self.db.execute(
-            select([AS_Range.start, AS_Range.stop])
-            .where(AS_Range.aut_sys == asnum)
-        )
 
 
 class Filter(object):
@@ -1409,12 +985,6 @@ class PostgresDBNmap(PostgresDB, DBNmap):
         self.flt_empty = NmapFilter()
         self.bulk = None
 
-    def get_context(self, addr, source=None):
-        ctxt = self.default_context(addr)
-        if source is None:
-            return ctxt
-        return 'Public' if ctxt == 'Public' else '%s-%s' % (ctxt, source)
-
     def is_scan_present(self, scanid):
         return bool(
             self.db.execute(
@@ -1455,7 +1025,6 @@ class PostgresDBNmap(PostgresDB, DBNmap):
 
     def store_hosts(self, hosts, merge=False):
         tmp = self.create_tmp_table(Scan, extracols=[
-            Column("context", String(32)),
             Column("scanfileid", ARRAY(LargeBinary(32))),
             Column("categories", ARRAY(String(32))),
             Column("source", String(32)),
@@ -1467,7 +1036,7 @@ class PostgresDBNmap(PostgresDB, DBNmap):
             Column("ports", postgresql.JSONB),
             # Column("traceroutes", postgresql.JSONB),
         ])
-        with ScanCSVFile(hosts, self.get_context, tmp, merge) as fdesc:
+        with ScanCSVFile(hosts, self.convert_ip, tmp, merge) as fdesc:
             self.copy_from(fdesc, tmp.name)
 
     def start_store_hosts(self):
@@ -1486,8 +1055,7 @@ insert structures.
         self.bulk = None
 
     def store_host(self, host, merge=False):
-        addr = host['addr']
-        addr = self.convert_ip(addr)
+        addr = self.convert_ip(host['addr'])
         info = host.get('infos')
         if 'coordinates' in (info or {}).get('loc', {}):
             info['coordinates'] = info.pop('loc')['coordinates'][::-1]
@@ -1596,8 +1164,7 @@ insert structures.
                 portid = self.db.execute(
                     insrt.values(scan=scanid, **port)
                     .on_conflict_do_update(
-                        index_elements=['scan', 'port',
-                                        'protocol'],
+                        index_elements=['scan', 'port', 'protocol'],
                         set_=dict(
                             scan=scanid,
                             **(port if newest else {})
@@ -2048,11 +1615,11 @@ the field names of the structured output for s7-info script.
             ###         Port.scan == base.c.id
             ###       )),
             ###
-            ### D'après quelques tests, l'option -1- est plus beaucoup
-            ### rapide quand (base) est pas ou peu sélectif, l'option
-            ### -2- un peu plus rapide quand (base) est très sélectif
+            ### D'apres quelques tests, l'option -1- est plus beaucoup
+            ### rapide quand (base) est pas ou peu selectif, l'option
+            ### -2- un peu plus rapide quand (base) est tres selectif
             ###
-            ### TODO: vérifier si c'est pareil pour:
+            ### TODO: verifier si c'est pareil pour:
             ###  - countports:open
             ###  - tous les autres
             info = field[9:]
@@ -2860,79 +2427,48 @@ the field names of the structured output for s7-info script.
 
 class PassiveFilter(Filter):
 
-    def __init__(self, main=None, location=None, aut_sys=None,
-                 uses_country=False):
+    def __init__(self, main=None):
         self.main = main
-        self.location = location
-        self.aut_sys = aut_sys
-        self.uses_country = uses_country
 
     @property
     def all_queries(self):
         return {
             "main": self.main,
-            "location": self.location,
-            "aut_sys": self.aut_sys,
         }
 
     def __nonzero__(self):
-        return self.main is not None or self.location is not None \
-            or self.aut_sys is not None or self.uses_country
+        return self.main is not None
 
     def copy(self):
         return self.__class__(
             main=self.main,
-            location=self.location,
-            aut_sys=self.aut_sys,
-            uses_country=self.uses_country,
         )
 
     def __and__(self, other):
         return self.__class__(
             main=self.fltand(self.main, other.main),
-            location=self.fltand(self.location, other.location),
-            aut_sys=self.fltand(self.aut_sys, other.aut_sys),
-            uses_country=self.uses_country or other.uses_country,
         )
 
     def __or__(self, other):
         return self.__class__(
             main=self.fltor(self.main, other.main),
-            location=self.fltor(self.location, other.location),
-            aut_sys=self.fltor(self.aut_sys, other.aut_sys),
-            uses_country=self.uses_country or other.uses_country,
         )
 
     @property
     def select_from(self):
-        if self.location is not None:
-            return [
-                join(Host, Passive),
-                join(join(Location, Country), Location_Range)
-                if self.uses_country else
-                join(Location, Location_Range),
-            ]
-        if self.aut_sys is not None:
-            return [join(Host, Passive), join(AS, AS_Range)]
-        return join(Host, Passive)
+        return Passive
 
     def query(self, req):
         if self.main is not None:
             req = req.where(self.main)
-        if self.location is not None:
-            req = req.where(self.location)
-        if self.aut_sys is not None:
-            req = req.where(self.aut_sys)
         return req
 
 
 class PostgresDBPassive(PostgresDB, DBPassive):
     tables = [Passive]
-    shared_tables = [(Host, [Flow.src, Flow.dst]),
-                     (Context, [Host.context])]
     fields = {
         "_id": Passive.id,
-        "addr": Host.addr,
+        "addr": Passive.addr,
         "sensor": Passive.sensor,
         "count": Passive.count,
         "firstseen": Passive.firstseen,
@@ -2969,12 +2505,6 @@ class PostgresDBPassive(PostgresDB, DBPassive):
         DBPassive.__init__(self)
         self.flt_empty = PassiveFilter()
 
-    def get_context(self, addr, sensor=None):
-        ctxt = self.default_context(addr)
-        if sensor is None:
-            return ctxt
-        return 'Public' if ctxt == 'Public' else '%s-%s' % (ctxt, sensor)
-
     def count(self, flt):
         return self.db.execute(
             flt.query(
@@ -2994,12 +2524,12 @@ returns a generator.
 
         """
         req = flt.query(
-            select(
-                [Host.addr, Passive.sensor, Passive.count, Passive.firstseen,
-                 Passive.lastseen, Passive.port, Passive.recontype,
-                 Passive.source, Passive.targetval, Passive.value,
-                 Passive.fullvalue, Passive.info, Passive.moreinfo]
-            ).select_from(flt.select_from)
+            select([
+                Passive.addr, Passive.sensor, Passive.count, Passive.firstseen,
+                Passive.lastseen, Passive.port, Passive.recontype,
+                Passive.source, Passive.targetval, Passive.value,
+                Passive.fullvalue, Passive.info, Passive.moreinfo
+            ]).select_from(flt.select_from)
         )
         for key, way in sort or []:
             req = req.order_by(key if way >= 0 else desc(key))
@@ -3035,11 +2565,6 @@ returns the first result, or None if no result exists."""
         timestamp = datetime.datetime.fromtimestamp(timestamp)
         if addr:
             addr = self.convert_ip(addr)
-            context = self.get_context(addr, sensor=spec.get('sensor'))
-            hostid = self.store_host_context(addr, context, timestamp,
-                                             timestamp)
-        else:
-            hostid = 0
         insrt = postgresql.insert(Passive)
         otherfields = dict(
             (key, spec.pop(key, ""))
@@ -3063,7 +2588,7 @@ returns the first result, or None if no result exists."""
         }
         self.db.execute(
             insrt.values(
-                host=hostid,
+                addr=addr,
                 # sensor: otherfields
                 count=spec.pop("count", 1),
                 firstseen=timestamp,
@@ -3077,7 +2602,7 @@ returns the first result, or None if no result exists."""
                 **otherfields
             )\
             .on_conflict_do_update(
-                index_elements=['host', 'sensor', 'recontype', 'port',
+                index_elements=['addr', 'sensor', 'recontype', 'port',
                                 'source', 'value', 'targetval', 'info'],
                 set_=upsert,
             )
@@ -3099,17 +2624,14 @@ returns the first result, or None if no result exists."""
 
         """
         more_to_read = True
-        tmp = self.create_tmp_table(Passive, extracols=[
-            Column("addr", postgresql.INET),
-            Column("context", String(32)),
-        ])
+        tmp = self.create_tmp_table(Passive)
         if config.DEBUG_DB:
             total_upserted = 0
             total_start_time = time.time()
         while more_to_read:
             if config.DEBUG_DB:
                 start_time = time.time()
-            with PassiveCSVFile(specs, self.get_context, tmp,
+            with PassiveCSVFile(specs, self.convert_ip, tmp,
                                 getinfos=getinfos,
                                 separated_timestamps=separated_timestamps,
                                 limit=config.POSTGRES_BATCH_SIZE) as fdesc:
@@ -3117,73 +2639,32 @@ returns the first result, or None if no result exists."""
                 more_to_read = fdesc.more_to_read
                 if config.DEBUG_DB:
                     count_upserted = fdesc.count
-            self.db.execute(postgresql.insert(Context).from_select(
-                ['name'],
-                select([column("context")]).select_from(tmp)
-                .where(tmp.columns["context"].isnot(null()))
-                .distinct(column("context")),
-            ).on_conflict_do_nothing())
-            insrt = postgresql.insert(Host)
-            self.db.execute(
-                insrt
-                .from_select(
-                    [column(col) for col in ['context', 'addr', 'firstseen',
-                                             'lastseen']],
-                    select([Context.id, column("addr"),
-                            func.min_(column("firstseen")),
-                            func.max_(column("lastseen"))])
-                    .select_from(join(Context, tmp,
-                                      Context.name == column("context")))
-                    .where(tmp.columns["addr"].isnot(null()))
-                    .group_by(Context.id, column("addr"))
-                )
-                .on_conflict_do_update(
-                    index_elements=['addr', 'context'],
-                    set_={
-                        'firstseen': func.least(
-                            Host.firstseen,
-                            insrt.excluded.firstseen,
-                        ),
-                        'lastseen': func.greatest(
-                            Host.lastseen,
-                            insrt.excluded.lastseen,
-                        )},
-                )
-            )
             insrt = postgresql.insert(Passive)
             self.db.execute(
                 insrt.from_select(
                     [column(col) for col in [
-                        # Host.id
-                        'host',
+                        'addr',
                         # sum / min / max
                         'count', 'firstseen', 'lastseen',
                         # grouped
                         'sensor', 'port', 'recontype', 'source', 'targetval',
                         'value', 'fullvalue', 'info', 'moreinfo'
                     ]],
-                    select([Host.id, func.sum_(tmp.columns['count']),
+                    select([tmp.columns['addr'],
+                            func.sum_(tmp.columns['count']),
                             func.min_(tmp.columns['firstseen']),
                             func.max_(tmp.columns['lastseen'])] + [
                                 tmp.columns[col] for col in [
                                     'sensor', 'port', 'recontype', 'source',
                                     'targetval', 'value', 'fullvalue', 'info',
                                     'moreinfo']])\
-                    .select_from(join(
-                        tmp, join(Context, Host),
-                        ((Context.name == tmp.columns["context"]) |
-                         (Context.name.is_(null()) &
-                          tmp.columns["context"].is_(null()))) &
-                        ((Host.addr == tmp.columns["addr"]) |
-                         (Host.addr.is_(null()) &
-                          tmp.columns["addr"].is_(null())))
-                    ))\
-                    .group_by(Host.id, *(tmp.columns[col] for col in [
-                        'sensor', 'port', 'recontype', 'source', 'targetval',
-                        'value', 'fullvalue', 'info', 'moreinfo']))
+                    .group_by(*(tmp.columns[col] for col in [
+                        'addr', 'sensor', 'port', 'recontype', 'source',
+                        'targetval', 'value', 'fullvalue', 'info', 'moreinfo'
+                    ]))
                 )\
                 .on_conflict_do_update(
-                    index_elements=['host', 'sensor', 'recontype', 'port',
+                    index_elements=['addr', 'sensor', 'recontype', 'port',
                                     'source', 'value', 'targetval', 'info'],
                     set_={
                         'firstseen': func.least(
@@ -3292,21 +2773,33 @@ passive table."""
             key = cls.fields[key]
         return PassiveFilter(main=key.op(cmpop)(val))
 
-    @staticmethod
-    def searchhost(addr, neg=False):
+    @classmethod
+    def searchhost(cls, addr, neg=False):
         """Filters (if `neg` == True, filters out) one particular host
         (IP address).
 
         """
-        return PassiveFilter(main=PostgresDB.searchhost(addr, neg=neg))
+        addr = cls.convert_ip(addr)
+        return PassiveFilter(
+            main=(Passive.addr != addr) if neg else (Passive.addr == addr),
+        )
 
-    @staticmethod
-    def searchhosts(hosts, neg=False):
-        return PassiveFilter(main=PostgresDB.searchhosts(hosts, neg=neg))
+    @classmethod
+    def searchhosts(cls, hosts, neg=False):
+        hosts = [cls.convert_ip(host) for host in hosts]
+        return PassiveFilter(
+            main=(Passive.addr.notin_(hosts) if neg else
+                  Passive.addr.in_(hosts)),
+        )
 
-    @staticmethod
-    def searchrange(start, stop, neg=False):
-        return PassiveFilter(main=PostgresDB.searchrange(start, stop, neg=neg))
+    @classmethod
+    def searchrange(cls, start, stop, neg=False):
+        start, stop = cls.convert_ip(start), cls.convert_ip(stop)
+        if neg:
+            return PassiveFilter(main=or_(Passive.addr < start,
+                                          Passive.addr > stop))
+        return PassiveFilter(main=and_(Passive.addr >= start,
+                                       Passive.addr <= stop))
 
     @staticmethod
     def searchrecontype(rectype):

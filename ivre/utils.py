@@ -25,6 +25,7 @@ sub-module or script.
 
 
 import ast
+from bisect import bisect_left
 import bz2
 import codecs
 import datetime
@@ -41,6 +42,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import time
 try:
     import PIL.Image
     import PIL.ImageChops
@@ -1049,8 +1051,14 @@ def normalize_props(props):
     return props
 
 
-def datetime2timestamp(dtetme):
-    return float(dtetme.strftime("%s.%f"))
+def datetime2timestamp(dtm):
+    """Returns the timestamp (as a float value) corresponding to the
+datetime.datetime instance `dtm`"""
+    # Python 2/3 compat: python 3 has datetime.timestamp()
+    try:
+        return dtm.timestamp()
+    except AttributeError:
+        return time.mktime(dtm.timetuple()) + dtm.microsecond / (1000000.)
 
 
 _UNITS = ['']
@@ -1103,3 +1111,63 @@ def parse_ssh_key(data):
         length = struct.unpack('>I', data[:4])[0]
         yield data[4:4 + length]
         data = data[4 + length:]
+
+
+_ADDR_TYPES = [
+    "Current-Net",
+    None,
+    "Private",
+    None,
+    "CGN",
+    None,
+    "Loopback",
+    None,
+    "Link-Local",
+    None,
+    "Private",
+    None,
+    "IPv6-to-IPv4",
+    None,
+    "Private",
+    None,
+    "Multicast",
+    "Reserved",
+    "Broadcast",
+]
+
+_ADDR_TYPES_LAST_IP = [
+    ip2int("0.255.255.255"),
+    ip2int("9.255.255.255"),
+    ip2int("10.255.255.255"),
+    ip2int("100.63.255.255"),
+    ip2int("100.127.255.255"),
+    ip2int("126.255.255.255"),
+    ip2int("127.255.255.255"),
+    ip2int("169.253.255.255"),
+    ip2int("169.254.255.255"),
+    ip2int("172.15.255.255"),
+    ip2int("172.31.255.255"),
+    ip2int("192.88.98.255"),
+    ip2int("192.88.99.255"),
+    ip2int("192.167.255.255"),
+    ip2int("192.168.255.255"),
+    ip2int("223.255.255.255"),
+    ip2int("239.255.255.255"),
+    ip2int("255.255.255.254"),
+    ip2int("255.255.255.255"),
+]
+
+
+def get_addr_type(addr):
+    """Returns the type (Private, Loopback, etc.) of an IPv4 address, or
+None if it is a "normal", usable address.
+
+    TODO: implement IPv6
+
+    """
+    try:
+        addr = ip2int(addr)
+    except (TypeError, socket.error):
+            # FIXME no IPv6 support
+            return None
+    return _ADDR_TYPES[bisect_left(_ADDR_TYPES_LAST_IP, addr)]

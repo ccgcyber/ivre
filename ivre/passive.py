@@ -30,7 +30,6 @@ import math
 import re
 import struct
 import subprocess
-import time
 
 
 from future.utils import viewitems
@@ -289,12 +288,7 @@ def handle_rec(sensor, ignorenets, neverignore,
     if source is not None:
         spec.update({'source': source})
     spec = _prepare_rec(spec, ignorenets, neverignore)
-    # Python 2/3 compat: python 3 has datetime.timestamp()
-    try:
-        float_ts = timestamp.timestamp()
-    except AttributeError:
-        float_ts = (time.mktime(timestamp.timetuple()) +
-                    timestamp.microsecond / (1000000.))
+    float_ts = utils.datetime2timestamp(timestamp)
     return float_ts, spec
 
 
