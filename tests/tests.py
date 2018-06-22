@@ -584,6 +584,9 @@ which `predicate()` is True, given `webflt`.
             self.assertEqual(res, 0)
             host_counter += sum(1 for _ in host_stored.finditer(err))
             scan_counter += sum(1 for _ in scan_stored.finditer(err))
+            for line in err.split(b'\n'):
+                if line[:11] != b'DEBUG:ivre:':
+                    print(line.decode())
             # Insertion test (== parsing only)
             res, out, _ = RUN(["ivre", "scan2db", "--port", "--test",
                                "-c", "TEST", "-s", "SOURCE", fname])
@@ -1361,7 +1364,7 @@ which `predicate()` is True, given `webflt`.
         self.assertEqual(count, 0)
         hosts_count -= 1
 
-        if DATABASE != "postgres":
+        if DATABASE not in ["postgres", "sqlite"]:
             # FIXME: for some reason, this does not terminate
             self.assertEqual(RUN(["ivre", "scancli", "--init"],
                                  stdin=open(os.devnull))[0], 0)
@@ -1467,9 +1470,15 @@ which `predicate()` is True, given `webflt`.
         )
         self.assertGreaterEqual(len(addrrange), 2)
         if len(addrrange) < 4:
-            addrrange = [addrrange[0], addrrange[-1]]
+            addrrange = [
+                ivre.db.db.passive.convert_ip(addrrange[0]),
+                ivre.db.db.passive.convert_ip(addrrange[-1])
+            ]
         else:
-            addrrange = [addrrange[1], addrrange[-2]]
+            addrrange = [
+                ivre.db.db.passive.convert_ip(addrrange[1]),
+                ivre.db.db.passive.convert_ip(addrrange[-2])
+            ]
         result = ivre.db.db.passive.count(
             ivre.db.db.passive.searchrange(*addrrange)
         )
@@ -1813,7 +1822,8 @@ which `predicate()` is True, given `webflt`.
         shutil.rmtree("logs")
 
 
-    def test_data(self):
+    # This test have to be done first.
+    def test_10_data(self):
         """ipdata (Maxmind, thyme.apnic.net) functions"""
 
         # Download
@@ -2314,13 +2324,14 @@ which `predicate()` is True, given `webflt`.
             del os.environ["IVRE_CONF"]
 
 
-TESTS = set(["nmap", "passive", "data", "utils", "scans", "conf"])
+TESTS = set(["nmap", "passive", "10_data", "utils", "scans", "conf"])
 
 
 DATABASES = {
     # **excluded** tests
     #"mongo": ["flow"],
     "postgres": ["scans"],
+    "sqlite": ["nmap", "scans"],
 }
 
 
