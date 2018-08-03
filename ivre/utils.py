@@ -33,6 +33,7 @@ import errno
 from functools import reduce
 import gzip
 import hashlib
+import json
 from io import BytesIO
 import logging
 import math
@@ -98,7 +99,13 @@ def ip2int(ipstr):
         ipstr = ipstr.decode()
     except AttributeError:
         pass
-    return struct.unpack('!I', socket.inet_aton(ipstr))[0]
+    try:
+        return struct.unpack('!I', socket.inet_aton(ipstr))[0]
+    except socket.error:
+        val1, val2 = struct.unpack(
+            '!QQ', socket.inet_pton(socket.AF_INET6, ipstr),
+        )
+        return (val1 << 64) + val2
 
 
 def force_ip2int(ipstr):
@@ -114,7 +121,15 @@ def int2ip(ipint):
     classical decimal, dot-separated, string representation.
 
     """
-    return socket.inet_ntoa(struct.pack('!I', ipint))
+    try:
+        if ipint > 0xffffffff:  # Python 2.6 would handle the overflow
+            raise struct.error()
+        return socket.inet_ntoa(struct.pack('!I', ipint))
+    except struct.error:
+        return socket.inet_ntop(
+            socket.AF_INET6,
+            struct.pack('!QQ', ipint >> 64, ipint & 0xffffffffffffffff),
+        )
 
 
 def force_int2ip(ipint):
@@ -304,6 +319,21 @@ def nmapspec2ports(string):
         else:
             result.add(int(ports))
     return result
+
+
+def all2datetime(arg):
+    """Return a datetime object from an int (timestamp) or an iso
+    formated string '%Y-%m-%d %H:%M:%S'.
+
+    """
+    if isinstance(arg, datetime.datetime):
+        return arg
+    if isinstance(arg, basestring):
+        return datetime.datetime.strptime(arg, '%Y-%m-%d %H:%M:%S')
+    if isinstance(arg, int):
+        return datetime.datetime.fromtimestamp(arg)
+    else:
+        raise TypeError("%s is of unknown type." % repr(arg))
 
 
 def makedirs(dirname):
@@ -617,13 +647,14 @@ class FakeArgparserParent(object):
 
 # Country aliases:
 #   - UK: GB
-#   - EU*: EU + 28 EU member states
+#   - EU: 28 EU member states, + EU itself, for historical reasons
 COUNTRY_ALIASES = {
     "UK": "GB",
-    "EU*": [
-        "EU", "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI",
-        "FR", "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT",
-        "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE", "GB",
+    "EU": [
+        "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
+        "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK",
+        "SI", "ES", "SE", "GB",
+        "EU",
     ],
 }
 
@@ -636,9 +667,10 @@ def country_unalias(country):
 
       - "UK": alias for "GB".
 
-      - "EU*": alias for a list containing "EU" (which is a code used
-        in Maxming GeoIP database) plus the list of the country codes
-        of the European Union member states.
+      - "EU": alias for a list containing the list of the country
+        codes of the European Union member states. It also includes
+        "EU" itself, because that was a valid "country" code in
+        previous Maxmind GeoIP databases.
 
     """
     if isinstance(country, basestring):
@@ -1276,7 +1308,9 @@ def get_cert_info(cert):
             if field in ['issuer', 'subject']:
                 data = [(_CERTKEYS.get(key, key), value)
                         for key, value in _parse_cert_subject(data)]
-                result[field] = dict(data)
+                # replace '.' by '_' in keys to produce valid JSON
+                result[field] = dict((key.replace('.', '_'), value)
+                                     for key, value in data)
                 result['%s_text' % field] = '/'.join('%s=%s' % item
                                                      for item in data)
             else:
@@ -1284,3 +1318,34 @@ def get_cert_info(cert):
     except Exception:
         LOGGER.info("Cannot parse certificate %r", cert, exc_info=True)
     return result
+
+
+def display_top(db, arg, flt, lmt):
+    field, least = ((arg[1:], True)
+                    if arg[:1] in '!-~' else
+                    (arg, False))
+    topnbr = {0: None, None: 10}.get(lmt, lmt)
+    for entry in db.topvalues(field, flt=flt, topnbr=topnbr, least=least):
+        if isinstance(entry['_id'], (list, tuple)):
+            sep = ' / ' if isinstance(entry['_id'], tuple) else ', '
+            if entry['_id']:
+                if isinstance(entry['_id'][0], (list, tuple)):
+                    entry['_id'] = sep.join(
+                        '/'.join(str(subelt) for subelt in elt)
+                        if elt else "None"
+                        for elt in entry['_id']
+                    )
+                elif isinstance(entry['_id'][0], dict):
+                    entry['_id'] = sep.join(
+                        json.dumps(elt, default=serialize)
+                        for elt in entry['_id']
+                    )
+                else:
+                    entry['_id'] = sep.join(str(elt)
+                                            for elt in entry['_id'])
+            else:
+                entry['_id'] = "None"
+        elif isinstance(entry['_id'], dict):
+            entry['_id'] = json.dumps(entry['_id'],
+                                      default=serialize)
+        print("%(_id)s: %(count)d" % entry)
