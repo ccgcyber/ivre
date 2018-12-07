@@ -126,7 +126,7 @@ specialized scripts.
         'bottle',
     ],
     extras_require={
-        'Flow':  ["py2neo>=3"],
+        'Flow': ["py2neo>=3"],
         'PostgreSQL': ["sqlalchemy", "psycopg2"],
         'GSSAPI authentication': ["python-krbV"],
         'Screenshots': ["PIL"],
@@ -188,6 +188,8 @@ specialized scripts.
           'web/static/templates/view-hosts.html',
           'web/static/templates/view-screenshots-only.html',
           'web/static/templates/view-scripts-only.html',
+          'web/static/templates/view-ports-only.html',
+          'web/static/templates/view-services-only.html',
           'web/static/templates/subview-cpes.html',
           'web/static/templates/subview-graph-elt-details.html',
           'web/static/templates/subview-host-summary.html',

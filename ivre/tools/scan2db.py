@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2017 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -15,6 +15,9 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with IVRE. If not, see <http://www.gnu.org/licenses/>.
+
+
+"""Parse NMAP scan results and add them in DB."""
 
 
 from __future__ import print_function
@@ -38,26 +41,11 @@ def recursive_filelisting(base_directories):
 
 
 def main():
-    try:
-        import argparse
-        parser = argparse.ArgumentParser(
-            description='Parse NMAP scan results and add them in DB.')
+    parser, use_argparse = ivre.utils.create_argparser(__doc__,
+                                                       extraargs='scan')
+    if use_argparse:
         parser.add_argument('scan', nargs='*', metavar='SCAN',
                             help='Scan results')
-
-    except ImportError:
-        import optparse
-        parser = optparse.OptionParser(
-            description='Parse NMAP scan results and add them in DB.')
-        parser.parse_args_orig = parser.parse_args
-
-        def my_parse_args():
-            res = parser.parse_args_orig()
-            res[0].ensure_value('scan', res[1])
-            return res[0]
-        parser.parse_args = my_parse_args
-        parser.add_argument = parser.add_option
-
     parser.add_argument('-c', '--categories', default='',
                         help='Scan categories.')
     parser.add_argument('-s', '--source', default=None,
@@ -89,9 +77,6 @@ def main():
     args = parser.parse_args()
     database = ivre.db.db.nmap
     categories = args.categories.split(',') if args.categories else []
-    callback = lambda x: ivre.db.db.view.store_or_merge_host(
-        nmap_record_to_view(x)
-    )
     if args.test:
         args.no_update_view = True
         database = ivre.db.DBNmap()
@@ -104,6 +89,11 @@ def main():
         scans = args.scan
     if args.no_update_view:
         callback = None
+    else:
+        def callback(x):
+            return ivre.db.db.view.store_or_merge_host(
+                nmap_record_to_view(x)
+            )
     count = 0
     for scan in scans:
         try:

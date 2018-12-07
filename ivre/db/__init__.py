@@ -22,12 +22,6 @@ database backends.
 """
 
 
-try:
-    import argparse
-except ImportError:
-    USING_ARGPARSE = False
-else:
-    USING_ARGPARSE = True
 from functools import reduce
 import json
 import os
@@ -85,10 +79,7 @@ class DB(object):
     globaldb = None
 
     def __init__(self):
-        if USING_ARGPARSE:
-            self.argparser = argparse.ArgumentParser(add_help=False)
-        else:
-            self.argparser = utils.FakeArgparserParent()
+        self.argparser = utils.ArgparserParent()
         self.argparser.add_argument(
             '--country', metavar='CODE',
             help='show only results from this country'
@@ -169,12 +160,13 @@ class DB(object):
         """
         raise NotImplementedError
 
-    def flt_or(self, *args):
+    @classmethod
+    def flt_or(cls, *args):
         """Returns a condition that is true iff any of the given
         conditions is true.
 
         """
-        return reduce(self._flt_or, args)
+        return reduce(cls._flt_or, args)
 
     @staticmethod
     def _flt_or(cond1, cond2):
@@ -374,7 +366,7 @@ class DBActive(DB):
                                     help='show only results from this source')
         self.argparser.add_argument('--version', metavar="VERSION", type=int)
         self.argparser.add_argument('--timeago', metavar='SECONDS', type=int)
-        if USING_ARGPARSE:
+        if utils.USE_ARGPARSE:
             self.argparser.add_argument('--id', metavar='ID', help='show only '
                                         'results with this(those) ID(s)',
                                         nargs='+')
@@ -404,6 +396,7 @@ class DBActive(DB):
                                     'open ports NOT within the provided range',
                                     nargs=2)
         self.argparser.add_argument('--script', metavar='ID[:OUTPUT]')
+        self.argparser.add_argument('--no-script', metavar='ID[:OUTPUT]')
         self.argparser.add_argument('--os')
         self.argparser.add_argument('--anonftp', action='store_true')
         self.argparser.add_argument('--anonldap', action='store_true')
@@ -889,7 +882,7 @@ they are stored as canonical string representations.
         raise NotImplementedError
 
     @staticmethod
-    def searchscript(name=None, output=None, values=None):
+    def searchscript(name=None, output=None, values=None, neg=False):
         raise NotImplementedError
 
     @staticmethod
@@ -1004,6 +997,15 @@ they are stored as canonical string representations.
                 name, output = utils.str2regexp(args.script), None
             flt = self.flt_and(flt, self.searchscript(name=name,
                                                       output=output))
+        if args.no_script is not None:
+            if ':' in args.no_script:
+                name, output = (utils.str2regexp(string) for
+                                string in args.no_script.split(':', 1))
+            else:
+                name, output = utils.str2regexp(args.no_script), None
+            flt = self.flt_and(flt, self.searchscript(name=name,
+                                                      output=output,
+                                                      neg=True))
         if args.os is not None:
             flt = self.flt_and(
                 flt,
@@ -1464,7 +1466,18 @@ class DBPassive(DB):
 
     @classmethod
     def searchranges(cls, ranges, neg=False):
-        raise NotImplementedError
+        """Filters (if `neg` == True, filters out) some IP address ranges.
+
+`ranges` is an instance of ivre.geoiputils.IPRanges().
+
+        """
+        flt = []
+        for start, stop in ranges.iter_ranges():
+            flt.append(cls.searchrange(cls.ip2internal(start),
+                                       cls.ip2internal(stop), neg=neg))
+        if flt:
+            return (cls.flt_and if neg else cls.flt_or)(*flt)
+        return cls.flt_empty if neg else cls.searchnonexistent()
 
     def searchtorcert(self):
         return self.searchcertsubject(
@@ -1803,9 +1816,9 @@ and raises a LockError on failure.
         scan = self._lock_scan(scanid, None, lockid.bytes)
         if scan['lock'] is not None:
             # This might be a bug in uuid module, Python 2 only
-            ##  File "/opt/python/2.6.9/lib/python2.6/uuid.py", line 145,
-            ## in __init__
-            ##    int = long(('%02x'*16) % tuple(map(ord, bytes)), 16)
+            #    File "/opt/python/2.6.9/lib/python2.6/uuid.py", line 145,
+            #   in __init__
+            #      int = long(('%02x'*16) % tuple(map(ord, bytes)), 16)
             # scan['lock'] = uuid.UUID(bytes=scan['lock'])
             scan['lock'] = uuid.UUID(
                 hex=utils.encode_hex(scan['lock']).decode()

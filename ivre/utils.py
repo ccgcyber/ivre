@@ -25,6 +25,12 @@ sub-module or script.
 
 
 import ast
+try:
+    import argparse
+    USE_ARGPARSE = True
+except ImportError:
+    import optparse
+    USE_ARGPARSE = False
 from bisect import bisect_left
 import bz2
 import codecs
@@ -52,7 +58,7 @@ except ImportError:
     USE_PIL = False
 
 
-from builtins import bytes, int, object, range, str
+from builtins import bytes, int as int_types, object, range, str
 from future.utils import PY3, viewitems
 from past.builtins import basestring
 
@@ -427,7 +433,7 @@ def all2datetime(arg):
         return arg
     if isinstance(arg, basestring):
         return datetime.datetime.strptime(arg, '%Y-%m-%d %H:%M:%S')
-    if isinstance(arg, int):
+    if isinstance(arg, int_types):
         return datetime.datetime.fromtimestamp(arg)
     else:
         raise TypeError("%s is of unknown type." % repr(arg))
@@ -462,7 +468,7 @@ def isfinal(elt):
     that does not contain other elements)
 
     """
-    return isinstance(elt, (basestring, int, float, datetime.datetime,
+    return isinstance(elt, (basestring, int_types, float, datetime.datetime,
                             REGEXP_T))
 
 
@@ -722,24 +728,97 @@ LOGGER.addFilter(LogFilter())
 LOGGER.setLevel(1 if config.DEBUG or config.DEBUG_DB else 20)
 
 
-class FakeArgparserParent(object):
-    """This is a stub to implement a parent-like behavior when
-    optparse has to be used.
-
-    """
-
-    def __init__(self, parents=None):
-        self.args = []
-        if parents is not None:
-            for parent in parents:
-                self.args.extend(parent.args)
-
-    def add_argument(self, *args, **kargs):
-        """Stores parent's arguments for latter (manual)
-        processing.
+if USE_ARGPARSE:
+    def ArgparserParent():
+        return argparse.ArgumentParser(add_help=False)
+else:
+    class ArgparserParent(object):
+        """This is a stub to implement a parent-like behavior when
+        optparse has to be used.
 
         """
-        self.args.append((args, kargs))
+
+        def __init__(self):
+            self.args = []
+
+        def add_argument(self, *args, **kargs):
+            """Stores parent's arguments for latter (manual)
+            processing.
+
+            """
+            self.args.append((args, kargs))
+
+
+def create_argparser(description, extraargs=None):
+    """This function helps create a parser with either argparse (if it is
+    available) or optparse. This pattern exists because argparse does
+    not exist by default in Python 2.6.
+
+    `description` is used as the description argument of
+    argparse.ArgumentParser() or optparse.OptionParser().
+
+    This function returns a tuple corresponding to the parser and a
+    boolean (True iff argparse is used).
+
+    """
+    if USE_ARGPARSE:
+        return argparse.ArgumentParser(description=__doc__), True
+    parser = optparse.OptionParser(description=__doc__)
+    parser.parse_args_orig = parser.parse_args
+
+    def my_parse_args():
+        res = parser.parse_args_orig()
+        if extraargs is None:
+            if res[1]:
+                raise optparse.OptionError(
+                    'unrecognized arguments', res[1]
+                )
+        else:
+            res = parser.parse_args_orig()
+            res[0].ensure_value(extraargs, res[1])
+            return res[0]
+
+    parser.parse_args = my_parse_args
+    parser.add_argument = parser.add_option
+    return parser, False
+
+
+CLI_ARGPARSER = ArgparserParent()
+# DB
+CLI_ARGPARSER.add_argument('--init', '--purgedb', action='store_true',
+                           help='Purge or create and initialize the database.')
+CLI_ARGPARSER.add_argument('--ensure-indexes', action='store_true',
+                           help='Create missing indexes (will lock the '
+                           'database).')
+CLI_ARGPARSER.add_argument('--update-schema', action='store_true',
+                           help='update (host) schema. Use with --version to '
+                           'specify your current version')
+# Actions / display modes
+CLI_ARGPARSER.add_argument('--delete', action='store_true',
+                           help='DELETE the matched results instead of '
+                           'displaying them.')
+CLI_ARGPARSER.add_argument('--short', action='store_true',
+                           help='Output only IP addresses, one per line.')
+CLI_ARGPARSER.add_argument('--count', action='store_true',
+                           help='Count matched results.')
+CLI_ARGPARSER.add_argument('--explain', action='store_true',
+                           help='MongoDB specific: .explain() the query.')
+CLI_ARGPARSER.add_argument('--distinct', metavar='FIELD',
+                           help='Output only unique FIELD part of the '
+                           'results, one per line.')
+CLI_ARGPARSER.add_argument('--json', action='store_true',
+                           help='Output results as JSON documents.')
+if USE_ARGPARSE:
+    CLI_ARGPARSER.add_argument('--sort', metavar='FIELD / ~FIELD', nargs='+',
+                               help='Sort results according to FIELD; use '
+                               '~FIELD to reverse sort order.')
+else:
+    CLI_ARGPARSER.add_argument('--sort', metavar='FIELD / ~FIELD',
+                               help='Sort results according to FIELD; use '
+                               '~FIELD to reverse sort order.')
+CLI_ARGPARSER.add_argument('--limit', type=int,
+                           help='Ouput at most LIMIT results.')
+CLI_ARGPARSER.add_argument('--skip', type=int, help='Skip first SKIP results.')
 
 
 # Country aliases:
@@ -1432,7 +1511,7 @@ def get_cert_info(cert):
     result = {}
     for hashtype in ['md5', 'sha1', 'sha256']:
         result[hashtype] = hashlib.new(hashtype, cert).hexdigest()
-    proc = subprocess.Popen(['openssl', 'x509', '-noout', '-text',
+    proc = subprocess.Popen([config.OPENSSL_CMD, 'x509', '-noout', '-text',
                              '-inform', 'DER'], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE)
     proc.stdin.write(cert)
@@ -1475,8 +1554,7 @@ def display_top(db, arg, flt, lmt):
     field, least = ((arg[1:], True)
                     if arg[:1] in '!-~' else
                     (arg, False))
-    topnbr = {0: None, None: 10}.get(lmt, lmt)
-    for entry in db.topvalues(field, flt=flt, topnbr=topnbr, least=least):
+    for entry in db.topvalues(field, flt=flt, topnbr=lmt or 10, least=least):
         if isinstance(entry['_id'], (list, tuple)):
             sep = ' / ' if isinstance(entry['_id'], tuple) else ', '
             if entry['_id']:

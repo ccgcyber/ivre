@@ -26,7 +26,6 @@ import codecs
 from collections import namedtuple
 import csv
 import datetime
-from functools import reduce
 import json
 import re
 
@@ -226,9 +225,11 @@ class PassiveCSVFile(CSVFile):
 
 
 class SQLDB(DB):
+
     table_layout = namedtuple("empty_layout", [])
     tables = table_layout()
     fields = {}
+    no_limit = None
 
     def __init__(self, url):
         self.dburl = url
@@ -408,22 +409,6 @@ field.
     def _flt_or(cond1, cond2):
         return cond1 | cond2
 
-    @classmethod
-    def flt_and(cls, *args):
-        """Returns a condition that is true iff all of the given
-        conditions is true.
-
-        """
-        return reduce(cls._flt_and, args)
-
-    @classmethod
-    def flt_or(cls, *args):
-        """Returns a condition that is true iff any of the given
-        conditions is true.
-
-        """
-        return reduce(cls._flt_or, args)
-
     @staticmethod
     def _searchstring_re_inarray(idfield, field, value, neg=False):
         if isinstance(value, utils.REGEXP_T):
@@ -468,20 +453,6 @@ field.
             return field != value
         return field == value
 
-    def searchranges(self, ranges, neg=False):
-        """Filters (if `neg` == True, filters out) some IP address ranges.
-
-`ranges` is an instance of ivre.geoiputils.IPRanges().
-
-        """
-        flt = self.flt_empty
-        for start, stop in ranges.iter_ranges():
-            flt = (self.flt_and if neg else self.flt_or)(
-                flt, self.searchrange(utils.int2ip(start), utils.int2ip(stop),
-                                      neg=neg)
-            )
-        return flt
-
 
 class SQLDBFlow(SQLDB, DBFlow):
     table_layout = namedtuple("flow_layout", ['flow'])
@@ -505,7 +476,7 @@ class SQLDBFlow(SQLDB, DBFlow):
 
     def add_flow_metadata(self, labels, linktype, keys, flow_keys,
                           counters=None, accumulators=None, time=True,
-                          flow_labels=["Flow"]):
+                          flow_labels=None):
         raise NotImplementedError()
 
     def add_host_metadata(self, labels, linktype, keys, host_keys=None,
@@ -677,7 +648,7 @@ class ActiveFilter(Filter):
                     [self.tables.port.scan]
                 ).where(subflt).cte("base")
                 req = req.where(self.tables.scan.id.notin_(base))
-        for subflt in self.script:
+        for incl, subflt in self.script:
             subreq = select([1]).select_from(join(self.tables.script,
                                                   self.tables.port))
             if isinstance(subflt, tuple):
@@ -687,7 +658,10 @@ class ActiveFilter(Filter):
             else:
                 subreq = subreq.where(subflt)
             subreq = subreq.where(self.tables.port.scan == self.tables.scan.id)
-            req = req.where(exists(subreq))
+            if incl:
+                req = req.where(exists(subreq))
+            else:
+                req = req.where(not_(exists(subreq)))
         for subflt in self.trace:
             req = req.where(exists(
                 select([1])
@@ -1250,9 +1224,11 @@ the way IP addresses are stored.
         return cls.base_filter(port=[(True, req)])
 
     @classmethod
-    def searchscript(cls, name=None, output=None, values=None):
+    def searchscript(cls, name=None, output=None, values=None, neg=False):
         """Search a particular content in the scripts results.
 
+            If neg is True, filter out scan results which have at
+            least one script matching the name/output/value
         """
         req = True
         if name is not None:
@@ -1332,12 +1308,13 @@ the way IP addresses are stored.
                         )
                     )
             return cls.base_filter(script=[(
-                req,
-                [func.jsonb_array_elements(cls.tables.script.data[subkey])
-                 .alias(subkey.replace('.', '_').replace('-', '_'))
-                 for subkey in needunwind],
+                not neg, (
+                    req,
+                    [func.jsonb_array_elements(cls.tables.script.data[subkey2])
+                        .alias(subkey2.replace('.', '_').replace('-', '_'))
+                        for subkey2 in needunwind])
             )])
-        return cls.base_filter(script=[req])
+        return cls.base_filter(script=[(not neg, req)])
 
     @classmethod
     def searchcert(cls, keytype=None):
@@ -1433,22 +1410,22 @@ the way IP addresses are stored.
                     {"ls": {"volumes": [{"files": [{"filename": fname}]}]}}
                 ))
         if scripts is None:
-            return cls.base_filter(script=[req])
+            return cls.base_filter(script=[(True, req)])
         if isinstance(scripts, basestring):
             scripts = [scripts]
         if len(scripts) == 1:
-            return cls.base_filter(script=[and_(
+            return cls.base_filter(script=[(True, and_(
                 cls.tables.script.name == scripts.pop(), req
-            )])
-        return cls.base_filter(script=[and_(
+            ))])
+        return cls.base_filter(script=[(True, and_(
             cls.tables.script.name.in_(scripts), req
-        )])
+        ))])
 
     @classmethod
     def searchhttptitle(cls, title):
         return cls.base_filter(script=[
-            cls.tables.script.name.in_(['http-title', 'html-title']),
-            cls._searchstring_re(cls.tables.script.output, title),
+            (True, cls.tables.script.name.in_(['http-title', 'html-title'])),
+            (True, cls._searchstring_re(cls.tables.script.output, title)),
         ])
 
     @classmethod
@@ -1911,9 +1888,12 @@ passive table."""
         """
         if isinstance(field, basestring):
             field = self.fields[field]
-        outputproc = lambda val: val
+
         if field == "addr":
             outputproc = self.internal2ip
+        else:
+            def outputproc(val):
+                return val
         if flt is None:
             flt = PassiveFilter()
         order = "count" if least else desc("count")
@@ -1929,6 +1909,10 @@ passive table."""
              "_id": outputproc(result[1:] if len(result) > 2 else result[1])}
             for result in self.db.execute(req.order_by(order).limit(topnbr))
         )
+
+    @classmethod
+    def searchnonexistent(cls):
+        return PassiveFilter(main=False)
 
     def _searchobjectid(self, oid, neg=False):
         if len(oid) == 1:
@@ -1975,6 +1959,24 @@ passive table."""
                                           cls.tables.passive.addr > stop))
         return PassiveFilter(main=and_(cls.tables.passive.addr >= start,
                                        cls.tables.passive.addr <= stop))
+
+    @classmethod
+    def searchranges(cls, ranges, neg=False):
+        """Filters (if `neg` == True, filters out) some IP address ranges.
+
+`ranges` is an instance of ivre.geoiputils.IPRanges().
+
+        """
+        flt = []
+        for start, stop in ranges.iter_ranges():
+            start, stop = cls.ip2internal(start), cls.ip2internal(stop)
+            flt.append((or_ if neg else and_)(
+                cls.tables.passive.addr >= start,
+                cls.tables.passive.addr <= stop)
+            )
+        if flt:
+            return PassiveFilter(main=(and_ if neg else or_)(*flt))
+        return cls.flt_empty if neg else cls.searchnonexistent()
 
     @classmethod
     def searchrecontype(cls, rectype):

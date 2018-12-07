@@ -21,6 +21,7 @@ from __future__ import print_function
 try:
     import argparse
 except ImportError:
+    from itertools import chain
     import optparse
     USING_ARGPARSE = False
 else:
@@ -42,33 +43,25 @@ from ivre.activecli import display_short, display_distinct, \
     displayfunction_json, displayfunction_honeyd, displayfunction_nmapxml, \
     displayfunction_graphroute, displayfunction_explain, \
     displayfunction_remove, displayfunction_csv
-from ivre.utils import display_top
+from ivre.utils import display_top, CLI_ARGPARSER
 
 
 def main():
     if USING_ARGPARSE:
         parser = argparse.ArgumentParser(
             description='Access and query the active scans database.',
-            parents=[db.db.nmap.argparser],
+            parents=[db.db.nmap.argparser, CLI_ARGPARSER],
         )
     else:
         parser = optparse.OptionParser(
             description='Access and query the active scans database.',
         )
-        for args, kargs in db.db.nmap.argparser.args:
+        for args, kargs in chain(db.db.nmap.argparser.args,
+                                 CLI_ARGPARSER.args):
             parser.add_option(*args, **kargs)
         parser.parse_args_orig = parser.parse_args
         parser.parse_args = lambda: parser.parse_args_orig()[0]
         parser.add_argument = parser.add_option
-    parser.add_argument('--init', '--purgedb', action='store_true',
-                        help='Purge or create and initialize the database.')
-    parser.add_argument('--ensure-indexes', action='store_true',
-                        help='Create missing indexes (will lock the '
-                        'database).')
-    parser.add_argument('--short', action='store_true',
-                        help='Output only IP addresses, one per line.')
-    parser.add_argument('--json', action='store_true',
-                        help='Output results as JSON documents.')
     parser.add_argument('--no-screenshots', action='store_true',
                         help='When used with --json, do not output '
                         'screenshots data.')
@@ -94,23 +87,10 @@ def main():
     parser.add_argument('--graphroute-include', choices=['last-hop', 'target'],
                         help='How far should graphroute go? Default if to '
                         'exclude the last hop and the target for each result.')
-    parser.add_argument('--count', action='store_true',
-                        help='Count matched results.')
-    parser.add_argument('--explain', action='store_true',
-                        help='MongoDB specific: .explain() the query.')
-    parser.add_argument('--distinct', metavar='FIELD',
-                        help='Output only unique FIELD part of the '
-                        'results, one per line.')
     parser.add_argument('--top', metavar='FIELD / ~FIELD',
                         help='Output most common (least common: ~) values for '
                         'FIELD, by default 10, use --limit to change that, '
                         '--limit 0 means unlimited.')
-    parser.add_argument('--delete', action='store_true',
-                        help='DELETE the matched results instead of '
-                        'displaying them.')
-    parser.add_argument('--update-schema', action='store_true',
-                        help='update (host) schema. Use with --version to '
-                        'specify your current version')
     parser.add_argument('--csv', metavar='TYPE',
                         help='Output result as a CSV file',
                         choices=['ports', 'hops'])
@@ -123,18 +103,6 @@ def main():
     parser.add_argument('--csv-na-str', default="NA",
                         help='String to use for "Not Applicable" value '
                         '(defaults to "NA")')
-    if USING_ARGPARSE:
-        parser.add_argument('--sort', metavar='FIELD / ~FIELD', nargs='+',
-                            help='Sort results according to FIELD; use ~FIELD '
-                            'to reverse sort order.')
-    else:
-        parser.add_argument('--sort', metavar='FIELD / ~FIELD',
-                            help='Sort results according to FIELD; use ~FIELD '
-                            'to reverse sort order.')
-    parser.add_argument('--limit', type=int,
-                        help='Ouput at most LIMIT results.')
-    parser.add_argument('--skip', type=int,
-                        help='Skip first SKIP results.')
     args = parser.parse_args()
 
     out = sys.stdout
@@ -175,27 +143,32 @@ def main():
                          args.limit, args.skip)
         sys.exit(0)
     if args.json:
-        displayfunction = lambda x: displayfunction_json(
-            x, db.db.nmap, args.no_screenshots
-        )
+        def displayfunction(x):
+            return displayfunction_json(
+                x, db.db.nmap, args.no_screenshots
+            )
     elif args.honeyd:
         displayfunction = displayfunction_honeyd
     elif args.nmap_xml:
         displayfunction = displayfunction_nmapxml
     elif args.graphroute is not None:
-        displayfunction = lambda x: displayfunction_graphroute(
-            x, args.graphroute, args.graphroute_include,
-            args.graphroute_dont_reset
-        )
+        def displayfunction(x):
+            return displayfunction_graphroute(
+                x, args.graphroute, args.graphroute_include,
+                args.graphroute_dont_reset
+            )
     elif args.explain:
-        displayfunction = lambda x: displayfunction_explain(x, db.db.nmap)
+        def displayfunction(x):
+            return displayfunction_explain(x, db.db.nmap)
     elif args.delete:
-        displayfunction = lambda x: displayfunction_remove(x, db.db.nmap)
+        def displayfunction(x):
+            return displayfunction_remove(x, db.db.nmap)
     elif args.csv is not None:
-        displayfunction = lambda x: displayfunction_csv(
-            x, args.csv, args.csv_separator, args.csv_na_str,
-            args.csv_add_infos
-        )
+        def displayfunction(x):
+            return displayfunction_csv(
+                x, args.csv, args.csv_separator, args.csv_na_str,
+                args.csv_add_infos
+            )
     else:
 
         def displayfunction(cursor):

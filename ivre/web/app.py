@@ -142,59 +142,70 @@ def get_nmap_action(action):
     flt_params = get_nmap_base()
     preamble = "[\n"
     postamble = "]\n"
-    r2res = lambda x: x
     if action == "timeline":
         result, count = db.view.get_open_port_count(flt_params.flt)
         if request.params.get("modulo") is None:
-            r2time = lambda r: int(utils.datetime2timestamp(r['starttime']))
+            def r2time(r):
+                return int(utils.datetime2timestamp(r['starttime']))
         else:
-            r2time = lambda r: (int(utils.datetime2timestamp(r['starttime']))
-                                % int(request.params.get("modulo")))
+            def r2time(r):
+                return (int(utils.datetime2timestamp(r['starttime']))
+                        % int(request.params.get("modulo")))
         if flt_params.ipsasnumbers:
-            r2res = lambda r: [r2time(r), utils.ip2int(r['addr']),
-                               r['openports']['count']]
+            def r2res(r):
+                return [r2time(r), utils.ip2int(r['addr']),
+                        r['openports']['count']]
         else:
-            r2res = lambda r: [r2time(r), r['addr'], r['openports']['count']]
+            def r2res(r):
+                return [r2time(r), r['addr'], r['openports']['count']]
     elif action == "coordinates":
+        def r2res(r):
+            return {
+                "type": "Point",
+                "coordinates": r['_id'][::-1],
+                "properties": {"count": r['count']},
+            }
         preamble = '{"type": "GeometryCollection", "geometries": [\n'
         postamble = ']}\n'
         result = list(db.view.getlocations(flt_params.flt))
         count = len(result)
-        r2res = lambda r: {
-            "type": "Point",
-            "coordinates": r['_id'],
-            "properties": {"count": r['count']},
-        }
     elif action == "countopenports":
         result, count = db.view.get_open_port_count(flt_params.flt)
         if flt_params.ipsasnumbers:
-            r2res = lambda r: [utils.ip2int(r['addr']),
-                               r['openports']['count']]
+            def r2res(r):
+                return [utils.ip2int(r['addr']), r['openports']['count']]
         else:
-            r2res = lambda r: [r['addr'], r['openports']['count']]
+            def r2res(r):
+                return [r['addr'], r['openports']['count']]
     elif action == "ipsports":
         result, count = db.view.get_ips_ports(flt_params.flt)
         if flt_params.ipsasnumbers:
-            r2res = lambda r: [
-                utils.ip2int(r['addr']),
-                [[p['port'], p['state_state']]
-                 for p in r.get('ports', [])
-                 if 'state_state' in p]
-            ]
+            def r2res(r):
+                return [
+                    utils.ip2int(r['addr']),
+                    [[p['port'], p['state_state']]
+                     for p in r.get('ports', [])
+                     if 'state_state' in p]
+                ]
         else:
-            r2res = lambda r: [
-                r['addr'],
-                [[p['port'], p['state_state']]
-                 for p in r.get('ports', [])
-                 if 'state_state' in p]
-            ]
+            def r2res(r):
+                return [
+                    r['addr'],
+                    [[p['port'], p['state_state']]
+                     for p in r.get('ports', [])
+                     if 'state_state' in p]
+                ]
     elif action == "onlyips":
         result, count = db.view.get_ips(flt_params.flt)
         if flt_params.ipsasnumbers:
-            r2res = lambda r: utils.ip2int(r['addr'])
+            def r2res(r):
+                return utils.ip2int(r['addr'])
         else:
-            r2res = lambda r: r['addr']
+            def r2res(r):
+                return r['addr']
     elif action == "diffcats":
+        def r2res(r):
+            return r
         if request.params.get("onlydiff"):
             output = db.view.diff_categories(request.params.get("cat1"),
                                              request.params.get("cat2"),
@@ -301,9 +312,9 @@ def get_nmap_top(field):
 @check_referer
 def get_nmap():
     flt_params = get_nmap_base()
-    ## PostgreSQL: the query plan if affected by the limit and gives
-    ## really poor results. This is a temporary workaround (look for
-    ## XXX-WORKAROUND-PGSQL)
+    # PostgreSQL: the query plan if affected by the limit and gives
+    # really poor results. This is a temporary workaround (look for
+    # XXX-WORKAROUND-PGSQL).
     # result = db.view.get(flt_params.flt, limit=flt_params.limit,
     #                      skip=flt_params.skip, sort=flt_params.sortby)
     result = db.view.get(flt_params.flt, skip=flt_params.skip,
@@ -334,7 +345,7 @@ def get_nmap():
         yield "[\n"
     else:
         yield "%s([\n" % flt_params.callback
-    ## XXX-WORKAROUND-PGSQL
+    # XXX-WORKAROUND-PGSQL
     # for rec in result:
     for i, rec in enumerate(result):
         for fld in ['_id', 'scanid']:
@@ -498,3 +509,16 @@ def get_flow():
     yield json.dumps(res, default=utils.serialize)
     if callback is not None:
         yield ");\n"
+
+
+#
+# /ipdata/
+#
+
+@application.get('/ipdata/<addr>')
+def get_ipdata(addr):
+    callback = request.params.get("callback")
+    result = json.dumps(db.data.infos_byip(addr))
+    if callback is None:
+        return result + '\n'
+    return "%s(%s);\n" % (callback, result)

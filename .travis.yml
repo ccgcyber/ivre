@@ -61,11 +61,15 @@ addons:
     - tesseract-ocr-eng
 
 install:
+  # flake8 would upgrade by setuptools to a version >= 40.0.0, which does not support Python 3.3
+  - test "$TRAVIS_PYTHON_VERSION" = 3.3 && pip install -U 'setuptools<40.0.0' || true
   - source ./.travis/install_${DB}.sh
   - pip install -U $PIP_INSTALL_OPTIONS .
-  - pip install -U flake8
+  - test "$TRAVIS_PYTHON_VERSION" = 3.3 && pip install flake8 || pip install -U flake8
   - PYVERS=`python -c 'import sys;print("%d%d" % sys.version_info[:2])'`; if [ -f "requirements-$DB-$PYVERS.txt" ]; then  pip install -U $PIP_INSTALL_OPTIONS -r "requirements-$DB-$PYVERS.txt"; else pip install -U $PIP_INSTALL_OPTIONS -r "requirements-$DB.txt"; fi
-  - test "$TRAVIS_PYTHON_VERSION" = 2.6 && pip install -U unittest2 || true
+  # Python 2.6 needs unittest2, and coverage / codecov would install requests to a version which
+  # does not support Python 2.6
+  - test "$TRAVIS_PYTHON_VERSION" = 2.6 && pip install -U unittest2 'requests<=2.18.4' || true
   - pip install -U $PIP_INSTALL_OPTIONS coverage codecov
   # cleanup
   - rm -rf ivre/
@@ -78,9 +82,9 @@ before_script:
   # display version
   - ivre version
   # init DB
-  - ivre ipinfo --init < /dev/null || echo "ERROR failed to init passive database."
-  - ivre scancli --init < /dev/null || echo "ERROR failed to init nmap database."
-  - ivre view --init < /dev/null || echo "ERROR failed to init view database."
+  - test "$DB" = "maxmind" || ivre ipinfo --init < /dev/null || echo "ERROR failed to init passive database."
+  - test "$DB" = "maxmind" || ivre scancli --init < /dev/null || echo "ERROR failed to init nmap database."
+  - test "$DB" = "maxmind" || ivre view --init < /dev/null || echo "ERROR failed to init view database."
   - cat .travis/ivre.conf >> ~/.ivre.conf
   - echo "NMAP_SHARE_PATH = '`pwd`/usr/local/nmap/share/nmap'" >> ~/.ivre.conf
   # install p0f, Bro & Nmap (.tar files)
@@ -88,7 +92,7 @@ before_script:
   - for archive in tools-travis-ivre bro-2.5.2_ubuntu-14.04 nmap-7.60_ubuntu-precise; do wget --no-check-certificate https://ivre.rocks/data/tests/${archive}.tar.bz2 -O - | tar jxf - ; done
   # get GeoIP CSV files -- we are supposed to build them, but that's
   # disabled in Travis since that's too slow
-  - wget --no-check-certificate -P `python -c 'from ivre import config; print(config.GEOIP_PATH)'` https://ivre.rocks/data/tests/db/GeoLite2-{ASN,City}.dump-IPv4.csv.bz2; bunzip2 "/`python -c 'from ivre import config; print(config.GEOIP_PATH)'`/"GeoLite2-{ASN,City}.dump-IPv4.csv.bz2
+  - wget --no-check-certificate -P `python -c 'from ivre import config; print(config.GEOIP_PATH)'` https://ivre.rocks/data/tests/db/GeoLite2-{ASN,City,Country}.dump-IPv4.csv.bz2; bunzip2 "/`python -c 'from ivre import config; print(config.GEOIP_PATH)'`/"GeoLite2-{ASN,City,Country}.dump-IPv4.csv.bz2
   - export PATH="`pwd`/tools/bin:`pwd`/usr/local/bro/bin:`pwd`/usr/local/nmap/bin:$PATH"
   - export LD_LIBRARY_PATH="`pwd`/tools/lib:`pwd`/usr/local/bro/lib"
   - export BROPATH=".:`pwd`/usr/local/bro/share/bro:`pwd`/usr/local/bro/share/bro/policy:`pwd`/usr/local/bro/share/bro/site"
@@ -108,7 +112,7 @@ before_script:
   ## Nmap IPv6 scans
   - wget https://raw.githubusercontent.com/logstash-plugins/logstash-codec-nmap/master/spec/fixtures/ipv6_all.xml -O "tests/samples/ipv6_all.xml"
   ## PCAP files from the Wireshark project
-  - for file in imap.cap http.cap telnet-raw.pcap nb6-startup.pcap nb6-http.pcap nb6-telephone.pcap nb6-hotspot.pcap Teredo.pcap sr-header.pcap; do wget "https://wiki.wireshark.org/SampleCaptures?action=AttachFile&do=get&target=$file" -O "tests/samples/$file"; done
+  - for file in dns.cap imap.cap http.cap telnet-raw.pcap nb6-startup.pcap nb6-http.pcap nb6-telephone.pcap nb6-hotspot.pcap Teredo.pcap sr-header.pcap; do wget "https://wiki.wireshark.org/SampleCaptures?action=AttachFile&do=get&target=$file" -O "tests/samples/$file"; done
   - for file in SSHv2.cap; do wget "http://packetlife.net/captures/$file" -O "tests/samples/$file"; done
   - wget 'https://www.cloudshark.org/captures/616566f75f0c/download' -O tests/samples/gre-sample.pcap
   - wget --no-check-certificate -O tests/samples/banners.pcap https://ivre.rocks/data/tests/banners.pcap
@@ -116,7 +120,7 @@ before_script:
   - export BRO_SAMPLES=`pwd`/usr/local/bro/testing
   - ivre --version; echo; bro --version
 
-script: (test "$TRAVIS_PYTHON_VERSION" = 2.6 || (flake8 setup.py && flake8 bin/ivre && flake8 ivre/ --ignore=E266,E731,W504 && echo "flake8 OK (except E266,E731,W504)")) && cd tests/ && coverage erase && coverage run --parallel-mode tests.py --coverage && coverage combine && coverage report
+script: (test "$TRAVIS_PYTHON_VERSION" = 2.6 || (flake8 --ignore= setup.py bin/ivre && flake8 --ignore=W504 ivre/ && echo "flake8 OK (except W504)")) && cd tests/ && coverage erase && coverage run --parallel-mode tests.py --coverage && coverage combine && coverage report
 
 after_success:
   - codecov

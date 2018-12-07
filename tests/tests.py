@@ -47,7 +47,7 @@ except ImportError:
     from urllib2 import HTTPError, Request, urlopen
 
 
-from future.builtins import int, range
+from future.builtins import int as int_types, range
 from past.builtins import basestring
 if sys.version_info[:2] < (2, 7):
     import unittest2 as unittest
@@ -846,6 +846,12 @@ which `predicate()` is True, given `webflt`.
         self.assertGreater(count, 0)
         self.check_value("nmap_robots.txt_count", count)
 
+        #Test for script negate filter
+        ncount = ivre.db.db.nmap.count(
+            ivre.db.db.nmap.searchscript(name="http-robots.txt", neg=True)
+        )
+        self.assertEqual(ncount, hosts_count - count)
+
         result = ivre.db.db.nmap.get(
             ivre.db.db.nmap.searchscript(name="http-robots.txt")
         )
@@ -862,6 +868,15 @@ which `predicate()` is True, given `webflt`.
             ))
         self.assertGreater(count, 0)
         self.check_value("nmap_robots.txt_cgi_count", count)
+
+        #Check the opposite condition
+        ncount = ivre.db.db.nmap.count(
+            ivre.db.db.nmap.searchscript(
+                name="http-robots.txt",
+                output=ivre.utils.str2regexp("/cgi-bin"),
+                neg=True,
+            ))
+        self.assertEqual(ncount, hosts_count - count)
 
         count = ivre.db.db.nmap.count(ivre.db.db.nmap.searchftpanon())
         # Test case OK?
@@ -1111,8 +1126,23 @@ which `predicate()` is True, given `webflt`.
         self.assertTrue(all(len(elt['_id']) == 2 for elt in locations))
         self.assertTrue(all(all(isinstance(sub, float) for sub in elt['_id'])
                             for elt in locations))
-        self.assertTrue(all(isinstance(elt['count'], int) for elt in locations))
+        self.assertTrue(all(isinstance(elt['count'], int_types)
+                            for elt in locations))
         self.check_value('nmap_location_count', len(locations))
+
+        # Check that all coordinates for IPs in "FR" are in a
+        # rectangle given by 43 < lat < 51 and -5 < lon < 8 (for some
+        # reasons, overseas territories have they own country code,
+        # e.g., "RE").
+        self.assertTrue(all(
+            43 < lat < 51 and -5 < lon < 8
+            for lat, lon in (
+                    elt['_id'] for elt in
+                    ivre.db.db.nmap.getlocations(
+                        ivre.db.db.nmap.searchcountry('FR')
+                    )
+            )
+        ))
 
         # moduli
         proc = RUN_ITER(["ivre", "getmoduli", "--active-ssl", "--active-ssh"],
@@ -1455,26 +1485,101 @@ which `predicate()` is True, given `webflt`.
 
         # Top values
         for distinct in [True, False]:
-            values = next(ivre.db.db.passive.topvalues(field="addr",
-                                                       distinct=distinct,
-                                                       topnbr=1))
+            cur = ivre.db.db.passive.topvalues(field="addr",
+                                               distinct=distinct,
+                                               topnbr=2)
+            values = next(cur)
+            while values.get('_id') is None:
+                values = next(cur)
             self.check_value(
                 "passive_top_addr_%sdistinct" % ("" if distinct else "not_"),
-                ivre.utils.ip2int(values["_id"]),
+                values["_id"],
             )
             self.check_value(
                 "passive_top_addr_%sdistinct_count" % ("" if distinct
                                                        else "not_"),
                 values["count"],
             )
+        # Delete the reference on the cursor to close the connection
+        # to the database (required for SQLite)
+        del cur
 
-        res, out, _ = RUN(["ivre", "ipinfo", "--top", "addr"])
+        # Top values (CLI)
+        res, out, err = RUN(["ivre", "ipinfo", "--top", "addr"])
+        self.assertTrue(not err)
         self.assertEqual(res, 0)
-        addr, count = out.decode().split('\n', 1)[0].split(': ')
-        addr = ivre.utils.ip2int(addr)
-        count = int(count)
+        out = out.decode().splitlines()
+        self.assertEqual(len(out), 10)
+        res, out, err = RUN(["ivre", "ipinfo", "--limit", "2", "--top",
+                             "addr"])
+        self.assertTrue(not err)
+        self.assertEqual(res, 0)
+        out = out.decode().splitlines()
+        self.assertEqual(len(out), 2)
+        addr, count = next(elt for elt in out
+                           if not elt.startswith('None: ')).split(': ')
         self.check_value("passive_top_addr_distinct", addr)
-        self.check_value("passive_top_addr_distinct_count", count)
+        self.check_value("passive_top_addr_distinct_count", int(count))
+        res, out, err = RUN(["ivre", "ipinfo", "--top", "addr"])
+        self.assertTrue(not err)
+        self.assertEqual(res, 0)
+        addr, count = next(elt for elt in out.decode().splitlines()
+                           if not elt.startswith('None: ')).split(': ')
+        self.check_value("passive_top_addr_distinct", addr)
+        self.check_value("passive_top_addr_distinct_count", int(count))
+
+        # CLI: --limit / --skip / --sort
+        # Using --limit should prevent ipinfo from selecting tailfnew mode
+        res, _, err = RUN(["ivre", "ipinfo", "--limit", "1"])
+        self.assertTrue(not err)
+        self.assertEqual(res, 0)
+        # Using --limit n with --json should produce at most n JSON
+        # lines
+        for count in 5, 10:
+            res, out, err = RUN(["ivre", "ipinfo", "--limit", str(count),
+                                 "--json"])
+            self.assertTrue(not err)
+            self.assertEqual(res, 0)
+            out = out.decode().splitlines()
+            self.assertEqual(len(out), count)
+            for line in out:
+                json.loads(line)
+        # Test --skip
+        for skip in 5, 10:
+            for count in 5, 10:
+                res, out, err = RUN(["ivre", "ipinfo", "--limit", str(count),
+                                     "--skip", str(skip), "--json"])
+                self.assertTrue(not err)
+                self.assertEqual(res, 0)
+                out = out.decode().splitlines()
+                self.assertEqual(len(out), count)
+                for line in out:
+                    json.loads(line)
+        res, out1, err = RUN(["ivre", "ipinfo", "--limit", "1", "--json"])
+        self.assertTrue(not err)
+        self.assertEqual(res, 0)
+        res, out2, err = RUN(["ivre", "ipinfo", "--limit", "1", "--skip", "1",
+                              "--json"])
+        self.assertTrue(not err)
+        self.assertEqual(res, 0)
+        self.assertFalse(out1 == out2)
+        # Test --sort
+        res, out, err = RUN(["ivre", "ipinfo", "--json", "--sort", "port"])
+        self.assertTrue(not err)
+        self.assertEqual(res, 0)
+        port = 0
+        for line in out.decode().splitlines():
+            nport = json.loads(line).get('port', 0)
+            self.assertTrue(port <= nport)
+            port = nport
+        res, out, err = RUN(["ivre", "ipinfo", "--json", "--sort", "~port"])
+        self.assertTrue(not err)
+        self.assertEqual(res, 0)
+        port = 65536
+        for line in out.decode().splitlines():
+            nport = json.loads(line).get('port', 0)
+            self.assertTrue(port >= nport)
+            port = nport
 
         # moduli
         proc = RUN_ITER(["ivre", "getmoduli", "--passive-ssl", "--passive-ssh"],
@@ -1513,6 +1618,25 @@ which `predicate()` is True, given `webflt`.
         self.assertEqual(proc.wait(), 0)
         self.check_value("passive_distinct_ssh_moduli", distinct)
         self.check_value("passive_max_moduli_ssh_reuse", maxcount)
+
+        # ASNs / Countries / .searchranges()
+        for asnum in [15169, 15557, 3215, 2200, 123456789]:
+            res, out, err = RUN(["ivre", "ipinfo", "--count", "--asnum", str(asnum)])
+            self.assertEqual(ret, 0)
+            self.assertTrue(not err)
+            self.check_value("passive_count_as%d" % asnum, int(out))
+        for cname in ['US', 'FR', 'DE', 'KP', 'XX']:
+            if DATABASE == "sqlite" and cname in ['US', 'FR', 'DE']:
+                # With sqlite, the filter generates a huge expression
+                # which leads to the following error:
+                #
+                # sqlite3.OperationalError: Expression tree is too
+                # large (maximum depth 10000)
+                continue
+            res, out, err = RUN(["ivre", "ipinfo", "--count", "--country", cname])
+            self.assertEqual(ret, 0)
+            self.assertTrue(not err)
+            self.check_value("passive_count_country_%s" % cname, int(out))
 
         # Delete
         flt = ivre.db.db.passive.searchcert()
@@ -1602,6 +1726,9 @@ which `predicate()` is True, given `webflt`.
         res = RUN(["ivre", "ipdata", "--download"])[0]
         self.assertEqual(res, 0)
 
+        # Reinit passive DB since we have downloaded the files
+        ivre.db.db.data.reload_files()
+
         if DATABASE != "maxmind":
             print(u"Database files have been downloaded -- "
                   u"other data tests won't run")
@@ -1616,6 +1743,10 @@ which `predicate()` is True, given `webflt`.
                                  'GeoLite2-%s.dump-IPv4.csv' % sub)
             if os.path.isfile(fname):
                 os.utime(fname, None)
+        fname = os.path.join(ivre.config.GEOIP_PATH,
+                             'GeoLite2-Country.dump-IPv4.csv')
+        if os.path.isfile(fname):
+            os.unlink(fname)
         proc = RUN_ITER(["ivre", "ipdata", "--import-all"],
                         stdout=sys.stdout, stderr=sys.stderr)
         self.assertEqual(proc.wait(), 0)
@@ -1704,6 +1835,22 @@ which `predicate()` is True, given `webflt`.
         out1, out2 = out1.split(b'\n'), out2.split(b'\n')
         self.assertGreater(len(out1), 0)
         self.assertItemsEqual(out1, out2)
+        # Start a Web server to test CGI
+        self.start_web_server()
+        # Web API (JSON) vs Python API
+        for addr in ['8.8.8.8', '2003::1']:
+            req = Request('http://%s:%d/cgi/ipdata/%s' % (HTTPD_HOSTNAME,
+                                                          HTTPD_PORT, addr))
+            req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME, HTTPD_PORT))
+            udesc = urlopen(req)
+            self.assertEquals(udesc.getcode(), 200)
+            result = ivre.db.db.data.infos_byip(addr)
+            if result and 'coordinates' in result:
+                result['coordinates'] = list(result['coordinates'])
+            self.assertEqual(
+                result,
+                json.loads(udesc.read().decode()),
+            )
 
     def test_utils(self):
         """Functions that have not yet been tested"""
@@ -1900,6 +2047,18 @@ which `predicate()` is True, given `webflt`.
         # Web utils
         with self.assertRaises(ValueError):
             ivre.web.utils.query_from_params({'q': '"'})
+
+        # Country aliases
+        europe = ivre.utils.country_unalias('EU')
+        self.assertTrue('FR' in europe)
+        self.assertTrue('DE' in europe)
+        self.assertFalse('US' in europe)
+        self.assertEqual(ivre.utils.country_unalias('UK'),
+                         ivre.utils.country_unalias('GB'))
+        ukfr = ivre.utils.country_unalias(['FR', 'UK'])
+        self.assertTrue('FR' in ukfr)
+        self.assertTrue('GB' in ukfr)
+        self.assertEqual(ivre.utils.country_unalias('FR'), 'FR')
 
     def test_scans(self):
         "Run scans, with and without agents"
@@ -2213,8 +2372,15 @@ which `predicate()` is True, given `webflt`.
         view_count = self.check_view_count_value("view_get_count",
                                                  ivre.db.db.view.flt_empty,
                                                  [], None)
-        ret, out, _ = RUN(["ivre", "view"])
+        ret, out, err = RUN(["ivre", "view"])
         self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        self.assertEqual(len(out.splitlines()), view_count)
+
+        # --json
+        ret, out, err = RUN(["ivre", "view", "--json"])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
         self.assertEqual(len(out.splitlines()), view_count)
 
         # Filters
@@ -2253,6 +2419,20 @@ which `predicate()` is True, given `webflt`.
         self.check_view_top_value("view_topdomains_1", "domains:1")
         self.check_view_top_value("view_tophop", "hop")
         self.check_view_top_value("view_tophop_10+", "hop>10")
+
+        #Check script search filter
+        count = self.check_view_count_value(
+                "view_sslcert_count",
+                ivre.db.db.view.searchscript(name="ssl-cert"),
+                ["--script", "ssl-cert"],
+                "script:ssl-cert")
+
+        #and no script filter
+        self.check_view_count_value(
+                view_count - count,
+                ivre.db.db.view.searchscript(name="ssl-cert", neg=True),
+                ["--no-script", "ssl-cert"],
+                "!script:ssl-cert")
 
         # Check Web /scans
         addr = next(ivre.db.db.view.get(
@@ -2393,7 +2573,7 @@ which `predicate()` is True, given `webflt`.
         udesc = urlopen(req)
         self.assertEquals(udesc.getcode(), 200)
         self.assertTrue(
-            coords in
+            coords[::-1] in
             (x['coordinates']
              for x in json.loads(udesc.read().decode())['geometries'])
         )
@@ -2403,8 +2583,24 @@ which `predicate()` is True, given `webflt`.
         ## In the /24 network
         self.find_record_cgi(lambda rec: addr == rec['addr'],
                              webflt='net:%s' % addr_net)
-
-
+        # Check that all coordinates for IPs in "FR" are in a
+        # rectangle given by 43 < lat < 51 and -5 < lon < 8 (for some
+        # reasons, overseas territories have they own country code,
+        # e.g., "RE").
+        req = Request('http://%s:%d/cgi/scans/coordinates?q=country:FR' % (
+            HTTPD_HOSTNAME, HTTPD_PORT,
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEquals(udesc.getcode(), 200)
+        self.assertTrue(all(
+            43 < lat < 51 and -5 < lon < 8
+            for lat, lon in (
+                    x['coordinates'][::-1]
+                    for x in json.loads(udesc.read().decode())['geometries']
+            )
+        ))
 
     def test_conf(self):
         # Ensure env var IVRE_CONF is taken into account

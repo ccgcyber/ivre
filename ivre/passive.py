@@ -201,8 +201,8 @@ def _prepare_rec(spec, ignorenets, neverignore):
     # and if so, do so.
     if 'addr' in spec and \
        spec.get('source') not in neverignore.get(spec['recontype'], []):
-        for n in ignorenets.get(spec['recontype'], ()):
-            if n[0] <= spec['addr'] <= n[1]:
+        for start, stop in ignorenets.get(spec['recontype'], ()):
+            if start <= utils.force_ip2int(spec['addr']) <= stop:
                 return None
     # Then, let's clean up the records.
     # Change Symantec's random user agents (matching SYMANTEC_UA) to
@@ -386,9 +386,14 @@ def _getinfos_cert(spec, to_binary):
     for key, value in list(viewitems(info)):
         if key in ['issuer', 'subject']:
             for skey, svalue in list(viewitems(value)):
-                if len(svalue) > utils.MAXVALLEN:
+                # We enforce a utils.MAXVALLEN // 10 size limits for
+                # subkey values in subject and issuer; this is because
+                # MongoDB cannot index values longer than 1024 bytes,
+                # and subject and issuer fields may have more than one
+                # key.
+                if len(svalue) > utils.MAXVALLEN // 10:
                     fullinfo.setdefault(key, {})[skey] = svalue
-                    info[key][skey] = svalue[:utils.MAXVALLEN]
+                    info[key][skey] = svalue[:utils.MAXVALLEN // 10]
         elif len(value) > utils.MAXVALLEN:
             fullinfo[key] = value
             info[key] = value[:utils.MAXVALLEN]
