@@ -4,11 +4,11 @@ first scans and add the results to the database with all components
 machine.
 
 Please note that, depending on your distribution, the versions of some
-softwares might not be recent enough, particularly for MongoDB
+software packages might not be recent enough, particularly for MongoDB
 (version 2.6 minimum) and pymongo (version 2.7.2 minimum; see
 [README](README.md) to know which versions can be used with IVRE). If
-that's the case, you will have to install those softwares on you own,
-refering to their documentation (see
+that's the case, you will have to install those programs on you own,
+referring to their documentation (see
 [MongoDB on Debian](http://docs.mongodb.org/manual/tutorial/install-mongodb-on-debian/)
 or
 [MongoDB on Ubuntu](http://docs.mongodb.org/manual/tutorial/install-mongodb-on-ubuntu/)
@@ -59,8 +59,7 @@ and try again:
     # for m in rewrite.load wsgi.conf wsgi.load ; do
     >   [ -L $m ] || ln -s ../mods-available/$m ; done
     # cd ../
-    # ## replace /usr/share/ivre/web/wsgi/app.wsgi with the actual location if needed:
-    # echo 'Alias /cgi "/usr/share/ivre/web/wsgi/app.wsgi"' > conf-enabled/ivre.conf
+    # echo 'Alias /cgi "/usr/local/share/ivre/web/wsgi/app.wsgi"' > conf-enabled/ivre.conf
     # echo '<Location /cgi>' >> conf-enabled/ivre.conf
     # echo 'SetHandler wsgi-script' >> conf-enabled/ivre.conf
     # echo 'Options +ExecCGI' >> conf-enabled/ivre.conf
@@ -138,5 +137,5 @@ and the `ivre runscansagent` command.
 
 ---
 
-This file is part of IVRE. Copyright 2011 - 2018
+This file is part of IVRE. Copyright 2011 - 2019
 [Pierre LALET](mailto:pierre.lalet@cea.fr)

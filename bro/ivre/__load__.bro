@@ -27,7 +27,9 @@
 
 @load policy/frameworks/software/windows-version-detection
 
+@if(Version::number >= 20600)
 @load policy/protocols/dhcp/software
+@endif
 @load policy/protocols/ftp/software
 @load policy/protocols/http/detect-webapps
 @load policy/protocols/http/software
@@ -46,11 +48,7 @@
 @load policy/frameworks/software/windows-version-detection
 @load policy/protocols/ftp/detect
 
-@load policy/protocols/smb
-
 export {
-    redef FTP::default_capture_password = T;
-    redef HTTP::default_capture_password = T;
     redef Software::asset_tracking = ALL_HOSTS;
 }
 

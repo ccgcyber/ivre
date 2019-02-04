@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -251,18 +251,20 @@ def _prepare_rec(spec, ignorenets, neverignore):
                 newvalue = pattern.sub(replace, newvalue)
         if newvalue != value:
             spec['value'] = utils.nmap_encode_data(newvalue)
-    # Finally we prepare the record to be stored. For that, we make
-    # sure that no indexed value has a size greater than MAXVALLEN. If
-    # so, we replace the value with its SHA1 hash and store the
-    # original value in full[original column name].
-    if len(spec['value']) > utils.MAXVALLEN:
-        spec['fullvalue'] = spec['value']
-        spec['value'] = hashlib.sha1(spec['fullvalue'].encode()).hexdigest()
-    if 'targetval' in spec and len(spec['targetval']) > utils.MAXVALLEN:
-        spec['fulltargetval'] = spec['targetval']
-        spec['targetval'] = hashlib.sha1(
-            spec['fulltargetval'].encode()
-        ).hexdigest()
+    # SSL_{CLIENT,SERVER} JA3
+    elif ((spec['recontype'] == 'SSL_CLIENT' and spec['source'] == 'ja3') or
+          (spec['recontype'] == 'SSL_SERVER' and
+           spec['source'].startswith('ja3-'))):
+        value = spec['value']
+        spec.setdefault('infos', {})['raw'] = value
+        spec['value'] = hashlib.new("md5", value.encode()).hexdigest()
+        if spec['recontype'] == 'SSL_SERVER':
+            clientvalue = spec['source'][4:]
+            spec['infos'].setdefault('client', {})['raw'] = clientvalue
+            spec['source'] = 'ja3-%s' % hashlib.new(
+                "md5",
+                clientvalue.encode(),
+            ).hexdigest()
     return spec
 
 
@@ -289,23 +291,18 @@ def handle_rec(sensor, ignorenets, neverignore,
     return timestamp, spec
 
 
-def _getinfos_http_client_authorization(spec, _):
+def _getinfos_http_client_authorization(spec):
     """Extract (for now) the usernames and passwords from Basic
     authorization headers
     """
     infos = {}
-    fullinfos = {}
-    data = spec.get('fullvalue', spec['value']).split(None, 1)
+    data = spec['value'].split(None, 1)
     if data[1:]:
         if data[0].lower() == b'basic':
             try:
                 infos['username'], infos['password'] = utils.decode_b64(
                     data[1].strip()
                 ).decode('latin-1').split(':', 1)
-                for field in ['username', 'password']:
-                    if len(infos[field]) > utils.MAXVALLEN:
-                        fullinfos[field] = infos[field]
-                        infos[field] = infos[field][:utils.MAXVALLEN]
             except Exception:
                 pass
         elif data[0].lower() == 'digest':
@@ -322,127 +319,117 @@ def _getinfos_http_client_authorization(spec, _):
     res = {}
     if infos:
         res['infos'] = infos
-    if fullinfos:
-        res['fullinfos'] = fullinfos
     return res
 
 
-def _getinfos_http_server(spec, _):
-    header = utils.nmap_decode_data(spec.get('fullvalue', spec['value']))
+def _getinfos_http_server(spec):
+    header = utils.nmap_decode_data(spec['value'])
     banner = b"HTTP/1.1 200 OK\r\nServer: " + header + b"\r\n\r\n"
     res = _getinfos_from_banner(banner, probe="GetRequest")
     return res
 
 
-def _getinfos_dns(spec, _):
+def _getinfos_dns(spec):
     """Extract domain names in an handy-to-index-and-query form."""
     infos = {}
-    fullinfos = {}
     fields = {'domain': 'value', 'domaintarget': 'targetval'}
     for field in fields:
         try:
             if fields[field] not in spec:
                 continue
             infos[field] = []
-            fullinfos[field] = []
-            for domain in utils.get_domains(
-                    spec.get('full' + fields[field],
-                             spec[fields[field]])):
-                infos[field].append(domain[:utils.MAXVALLEN])
-                if len(domain) > utils.MAXVALLEN:
-                    fullinfos[field].append(domain)
+            for domain in utils.get_domains(spec[fields[field]]):
+                infos[field].append(domain)
             if not infos[field]:
                 del infos[field]
-            if not fullinfos[field]:
-                del fullinfos[field]
         except Exception:
             pass
     res = {}
     if infos:
         res['infos'] = infos
-    if fullinfos:
-        res['fullinfos'] = fullinfos
     return res
 
 
-def _getinfos_cert(spec, to_binary):
+def _getinfos_sslsrv(spec):
+    """Calls a source specific function for SSL_SERVER recontype
+records.
+
+    """
+    source = spec.get('source')
+    if source == 'cert':
+        return _getinfos_cert(spec)
+    if source.startswith('ja3-'):
+        return _getinfos_ja3(spec)
+    return {}
+
+
+def _getinfos_cert(spec):
     """Extract info from a certificate (hash values, issuer, subject,
     algorithm) in an handy-to-index-and-query form.
 
     """
+    # TODO: move to mongodb specific functions.
     try:
-        cert = utils.decode_b64(spec.pop('fullvalue', spec['value']).encode())
+        cert = utils.decode_b64(spec['value'].encode())
     except Exception:
         utils.LOGGER.info("Cannot parse certificate for record %r", spec,
                           exc_info=True)
         return {}
-    if len(cert) > utils.MAXVALLEN:
-        spec['fullvalue'] = to_binary(cert)
-        spec['value'] = hashlib.sha1(cert).hexdigest()
-    else:
-        spec['value'] = to_binary(cert)
     info = utils.get_cert_info(cert)
-    fullinfo = {}
-    for key, value in list(viewitems(info)):
-        if key in ['issuer', 'subject']:
-            for skey, svalue in list(viewitems(value)):
-                # We enforce a utils.MAXVALLEN // 10 size limits for
-                # subkey values in subject and issuer; this is because
-                # MongoDB cannot index values longer than 1024 bytes,
-                # and subject and issuer fields may have more than one
-                # key.
-                if len(svalue) > utils.MAXVALLEN // 10:
-                    fullinfo.setdefault(key, {})[skey] = svalue
-                    info[key][skey] = svalue[:utils.MAXVALLEN // 10]
-        elif len(value) > utils.MAXVALLEN:
-            fullinfo[key] = value
-            info[key] = value[:utils.MAXVALLEN]
     res = {}
     if info:
         res['infos'] = info
-    if fullinfo:
-        res['fullinfos'] = fullinfo
     return res
 
 
-def _fix_infos_size(spec):
-    for field in list(spec.get("infos", {})):
-        value = spec["infos"]
-        if len(value) > utils.MAXVALLEN:
-            spec.setdefault("fullinfos", {})[field] = value
-            spec["infos"][field] = value[:utils.MAXVALLEN]
+def _getinfos_ja3(spec):
+    """Extract hashes from JA3 fingerprint strings.
+
+    """
+    value = spec['infos']['raw']
+    data = value.encode()
+
+    info = dict(((hashtype, hashlib.new(hashtype, data).hexdigest())
+                 for hashtype in ['sha1', 'sha256']),
+                **spec['infos'])
+
+    if spec.get('recontype') == 'SSL_SERVER':
+        clientvalue = spec['infos']['client']['raw']
+        clientdata = clientvalue.encode()
+        info['client'].update(
+            (hashtype, hashlib.new(hashtype, clientdata).hexdigest())
+            for hashtype in ['sha1', 'sha256']
+        )
+
+    return {'infos': info}
 
 
 def _getinfos_from_banner(banner, proto="tcp", probe="NULL"):
     infos = utils.match_nmap_svc_fp(banner, proto=proto, probe=probe)
     if not infos:
         return {}
-    res = {'infos': infos}
-    _fix_infos_size(res)
-    return res
+    return {'infos': infos}
 
 
-def _getinfos_tcp_srv_banner(spec, _):
+def _getinfos_tcp_srv_banner(spec):
     """Extract info from a TCP server banner using Nmap database.
 
     """
-    return _getinfos_from_banner(utils.nmap_decode_data(
-        spec.get('fullvalue', spec['value'])
-    ))
+    return _getinfos_from_banner(utils.nmap_decode_data(spec['value']))
 
 
-def _getinfos_ssh_server(spec, _):
+def _getinfos_ssh_server(spec):
     """Convert an SSH server banner to a TCP banner and use
 _getinfos_tcp_srv_banner()"""
     return _getinfos_from_banner(utils.nmap_decode_data(
-        spec.get('fullvalue', spec['value'])
+        spec['value']
     ) + b'\r\n')
 
 
-def _getinfos_ssh_hostkey(spec, _):
+def _getinfos_ssh_hostkey(spec):
     """Parse SSH host keys."""
     infos = {}
-    data = utils.nmap_decode_data(spec.get('fullvalue', spec['value']))
+    data = utils.nmap_decode_data(spec['value'])
     for hashtype in ['md5', 'sha1', 'sha256']:
         infos[hashtype] = hashlib.new(hashtype, data).hexdigest()
     data = utils.parse_ssh_key(data)
@@ -465,9 +452,7 @@ def _getinfos_ssh_hostkey(spec, _):
         infos['bits'] = 256
     elif keytype == 'ssh-ed25519':
         infos['bits'] = len(next(data)) * 8
-    res = {'infos': infos}
-    _fix_infos_size(res)
-    return res
+    return {'infos': infos}
 
 
 _GETINFOS_FUNCTIONS = {
@@ -480,17 +465,17 @@ _GETINFOS_FUNCTIONS = {
     'HTTP_SERVER_HEADER':
     {'SERVER': _getinfos_http_server},
     'DNS_ANSWER': _getinfos_dns,
-    'SSL_SERVER': _getinfos_cert,
+    'SSL_SERVER': _getinfos_sslsrv,
+    'SSL_CLIENT': {'ja3': _getinfos_ja3},
     'TCP_SERVER_BANNER': _getinfos_tcp_srv_banner,
     'SSH_SERVER': _getinfos_ssh_server,
     'SSH_SERVER_HOSTKEY': _getinfos_ssh_hostkey,
 }
 
 
-def getinfos(spec, to_binary):
+def getinfos(spec):
     """This functions takes a document from a passive sensor, and
-    prepares its 'infos' and 'fullinfos' fields (which are not added
-    but returned).
+    prepares its 'infos' field (which is not added but returned).
 
     """
     function = _GETINFOS_FUNCTIONS.get(spec.get('recontype'))
@@ -499,4 +484,4 @@ def getinfos(spec, to_binary):
     if function is None:
         return {}
     if hasattr(function, '__call__'):
-        return function(spec, to_binary)
+        return function(spec)

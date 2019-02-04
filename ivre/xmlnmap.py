@@ -47,7 +47,7 @@ SCHEMA_VERSION = 11
 
 # Scripts that mix elem/table tags with and without key attributes,
 # which is not supported for now
-IGNORE_TABLE_ELEMS = set(['xmpp-info', 'sslv2'])
+IGNORE_TABLE_ELEMS = set(['xmpp-info', 'sslv2', 'sslv2-drown'])
 
 ALIASES_TABLE_ELEMS = {
     # ls unified output (ls NSE module + ftp-anon)
@@ -1707,8 +1707,8 @@ class NmapHandler(ContentHandler):
             line = lastosmatch['line']
             path = "os.osmatch.line:%s" % line
 
-        # CPEs are indexed in a dictionnary to agglomerate origins,
-        # but this dict is replaced with its values() in _pre_addhost.
+        # CPEs are indexed in a dictionary to agglomerate origins, but
+        # this dict is replaced with its values() in _pre_addhost.
         cpes = self._curhost.setdefault('cpes', {})
         if cpe not in cpes:
             try:

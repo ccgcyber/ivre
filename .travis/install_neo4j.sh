@@ -16,17 +16,21 @@
 # You should have received a copy of the GNU General Public License
 # along with IVRE. If not, see <http://www.gnu.org/licenses/>.
 
-# https://gist.github.com/roidrage/14e45c24b5a134e1f165
-wget -q "http://fastdl.mongodb.org/linux/mongodb-linux-x86_64-$MONGODB_VERSION.tgz"
-tar xfz "mongodb-linux-x86_64-$MONGODB_VERSION.tgz"
-rm "mongodb-linux-x86_64-$MONGODB_VERSION.tgz"
-export PATH="`pwd`/mongodb-linux-x86_64-$MONGODB_VERSION/bin:$PATH"
-PIP_INSTALL_OPTIONS=""
-mkdir -p data/db
-sudo mount -t tmpfs tmpfs data/db -o users,mode=0777
+DB=neo4j
+NEO4J_VERSION=3.5.1
 
-mongod --dbpath=data/db >/dev/null 2>&1 &
+wget -q -O - "https://neo4j.com/artifact.php?name=neo4j-community-${NEO4J_VERSION}-unix.tar.gz" | tar zxf -
+export PATH="`pwd`/neo4j-community-${NEO4J_VERSION}/bin:$PATH"
 
-# Wait for MongoDB
-# https://github.com/travis-ci/travis-ci/issues/2246#issuecomment-51685471
-until nc -z localhost 27017 ; do echo Waiting for MongoDB; sleep 1; done
+neo4j start
+
+# Wait for Neo4j
+until nc -z localhost 7474 ; do echo Waiting for Neo4j; sleep 1; done
+
+# Remove "password change required" for user neo4j
+neo4j stop
+sed -i 's/:password_change_required$/:/' "`pwd`/neo4j-community-${NEO4J_VERSION}/data/dbms/auth"
+neo4j start
+
+# Wait for Neo4j (again)
+until nc -z localhost 7474 ; do echo Waiting for Neo4j; sleep 1; done

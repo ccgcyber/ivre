@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -26,6 +26,7 @@ import codecs
 from collections import namedtuple
 import csv
 import datetime
+import hashlib
 import json
 import re
 
@@ -151,7 +152,7 @@ class PassiveCSVFile(CSVFile):
     info_fields = set(["distance", "signature", "version"])
 
     def __init__(self, siggen, ip2internal, table, limit=None, getinfos=None,
-                 to_binary=lambda val: val, separated_timestamps=True):
+                 separated_timestamps=True):
         self.ip2internal = ip2internal
         self.table = table
         self.inp = siggen
@@ -160,7 +161,6 @@ class PassiveCSVFile(CSVFile):
         if limit is not None:
             self.count = 0
         self.getinfos = getinfos
-        self.to_binary = to_binary
         self.timestamps = separated_timestamps
 
     def fixline(self, line):
@@ -182,13 +182,9 @@ class PassiveCSVFile(CSVFile):
                     line["lastseen"]
                 )
         if self.getinfos is not None:
-            additional_info = self.getinfos(line, self.to_binary)
+            line.update(self.getinfos(line))
             try:
-                line.update(additional_info['infos'])
-            except KeyError:
-                pass
-            try:
-                line.update(additional_info['fullinfos'])
+                line.update(line.pop('infos'))
             except KeyError:
                 pass
         if "addr" in line:
@@ -1711,6 +1707,7 @@ class SQLDBPassive(SQLDB, DBPassive):
         "infos.sha256": Passive.moreinfo.op('->>')('sha256'),
         "infos.subject": Passive.moreinfo.op('->>')('subject'),
         "infos.subject_text": Passive.moreinfo.op('->>')('subject_text'),
+        "infos.raw": Passive.moreinfo.op('->>')('raw'),
         "infos.domaintarget": Passive.moreinfo.op('->>')('domaintarget'),
         "infos.username": Passive.moreinfo.op('->>')('username'),
         "infos.password": Passive.moreinfo.op('->>')('password'),
@@ -1762,8 +1759,7 @@ returns a generator.
                 self.tables.passive.lastseen, self.tables.passive.port,
                 self.tables.passive.recontype, self.tables.passive.source,
                 self.tables.passive.targetval, self.tables.passive.value,
-                self.tables.passive.fullvalue, self.tables.passive.info,
-                self.tables.passive.moreinfo
+                self.tables.passive.info, self.tables.passive.moreinfo
             ]).select_from(flt.select_from)
         )
         for key, way in sort or []:
@@ -1780,6 +1776,9 @@ returns a generator.
             except (KeyError, ValueError):
                 pass
             rec["infos"] = dict(rec.pop("info"), **rec.pop("moreinfo"))
+            if rec.get('recontype') == 'SSL_SERVER' and \
+               rec.get('source') == 'cert':
+                rec['value'] = self.from_binary(rec['value'])
             yield rec
 
     def get_one(self, flt, skip=None):
@@ -1798,13 +1797,9 @@ returns the first result, or None if no result exists."""
         except (KeyError, ValueError):
             pass
         if getinfos is not None:
-            additional_info = getinfos(spec, self.to_binary)
+            spec.update(getinfos(spec))
             try:
-                spec.update(additional_info['infos'])
-            except KeyError:
-                pass
-            try:
-                spec.update(additional_info['fullinfos'])
+                spec.update(spec.pop('infos'))
             except KeyError:
                 pass
         addr = spec.pop("addr", None)
@@ -1817,7 +1812,7 @@ returns the first result, or None if no result exists."""
             addr = self.ip2internal(addr)
         otherfields = dict(
             (key, spec.pop(key, ""))
-            for key in ["sensor", "source", "targetval", "value"]
+            for key in ["sensor", "source", "targetval", "recontype", "value"]
         )
         info = dict(
             (key, spec.pop(key))
@@ -1831,9 +1826,7 @@ returns the first result, or None if no result exists."""
             'firstseen': timestamp,
             'lastseen': lastseen or timestamp,
             'port': spec.pop("port", 0),
-            'recontype': spec.pop("recontype"),
-            # source, targetval, value: otherfields
-            'fullvalue': spec.pop("fullvalue", None),
+            # source, targetval, recontype, value: otherfields
             'info': info,
             'moreinfo': spec,
             'schema_version': spec.pop('schema_version', None),
@@ -1867,7 +1860,6 @@ passive table."""
                 except KeyError:
                     pass
                 line.update(line.pop('infos', {}))
-                line.update(line.pop('fullinfos', {}))
                 for key, value in viewitems(line):
                     if isinstance(value, dict) and len(value) == 1 \
                        and "$numberLong" in value:
@@ -1878,8 +1870,7 @@ passive table."""
 
     def topvalues(self, field, flt=None, topnbr=10, sort=None,
                   limit=None, skip=None, least=False, distinct=True):
-        """This method makes use of the aggregation framework to
-        produce top values for a given field.
+        """This method produces top values for a given field.
 
         If `distinct` is True (default), the top values are computed
         by distinct events. If it is False, they are computed based on
@@ -2052,6 +2043,81 @@ passive table."""
             (cls.tables.passive.moreinfo.op('->>')(
                 'pubkeyalgo'
             ) == keytype + 'Encryption')
+        ))
+
+    @classmethod
+    def _searchja3(cls, value_or_hash=None):
+        if value_or_hash is None:
+            return True
+        if utils.HEX.search(value_or_hash):
+            try:
+                key = {
+                    32: cls.tables.passive.value,
+                    40: cls.tables.passive.moreinfo.op('->>')('sha1'),
+                    64: cls.tables.passive.moreinfo.op('->>')('sha256'),
+                }[len(value_or_hash)]
+            except KeyError:
+                pass
+            else:
+                return key == value_or_hash
+        return (
+            (cls.tables.passive.moreinfo.op('->>')('raw') == value_or_hash) &
+            (cls.tables.passive.value == hashlib.new(
+                'md5',
+                value_or_hash.encode(),
+            ).hexdigest())
+        )
+
+    @classmethod
+    def searchja3client(cls, value_or_hash=None):
+        return PassiveFilter(main=(
+            (cls.tables.passive.recontype == 'SSL_CLIENT') &
+            (cls.tables.passive.source == 'ja3') &
+            cls._searchja3(value_or_hash)
+        ))
+
+    @classmethod
+    def searchja3server(cls, value_or_hash=None, client_value_or_hash=None):
+        base = (
+            (cls.tables.passive.recontype == 'SSL_SERVER') &
+            cls._searchja3(value_or_hash)
+        )
+        if client_value_or_hash is None:
+            return PassiveFilter(main=(
+                base &
+                (cls.tables.passive.source.op('~')('^ja3-'))
+            ))
+        if utils.HEX.search(client_value_or_hash):
+            length = len(client_value_or_hash)
+            if length == 32:
+                return PassiveFilter(main=(
+                    base &
+                    (cls.tables.passive.source == (
+                        'ja3-%s' % client_value_or_hash
+                    ))
+                ))
+            if length == 40:
+                return PassiveFilter(main=(
+                    base &
+                    (cls.tables.passive.source.op('~')('^ja3-')) &
+                    (cls.tables.passive.moreinfo.op('->')('client')
+                     .op('->>')('sha1') == client_value_or_hash)
+                ))
+            if length == 64:
+                return PassiveFilter(main=(
+                    base &
+                    (cls.tables.passive.source.op('~')('^ja3-')) &
+                    (cls.tables.passive.moreinfo.op('->')('client')
+                     .op('->>')('sha256') == client_value_or_hash)
+                ))
+        return PassiveFilter(main=(
+            base &
+            (cls.tables.passive.source == ('ja3-%s' % hashlib.new(
+                'md5',
+                client_value_or_hash.encode(),
+            ).hexdigest())) &
+            (cls.tables.passive.moreinfo.op('->')('client')
+             .op('->>')('raw') == client_value_or_hash)
         ))
 
     @classmethod

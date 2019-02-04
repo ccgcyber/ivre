@@ -125,7 +125,7 @@ class SSLKey(object):
         proc = subprocess.Popen([config.OPENSSL_CMD, 'x509', '-noout', '-text',
                                  '-inform', 'DER'], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE)
-        proc.stdin.write(self.dbc.from_binary(der))
+        proc.stdin.write(der)
         proc.stdin.close()
         return proc.stdout.read()
 
@@ -167,9 +167,7 @@ class SSLPassiveKey(PassiveKey, SSLKey):
         SSLKey.__init__(self)
 
     def getkeys(self, record):
-        certtext = self._der2key(record['fullvalue']
-                                 if 'fullvalue' in record
-                                 else record['value'])
+        certtext = self._der2key(record['value'])
         if certtext is None:
             return
 

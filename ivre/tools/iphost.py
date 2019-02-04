@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2017 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -21,7 +21,6 @@
 
 
 from __future__ import print_function
-from datetime import datetime
 import getopt
 import re
 import sys
@@ -42,11 +41,7 @@ IPADDR = re.compile('^\\d+\\.\\d+\\.\\d+\\.\\d+$')
 
 def disp_rec(r):
     firstseen = r['firstseen']
-    if not isinstance(firstseen, datetime):
-        firstseen = datetime.fromtimestamp(firstseen)
     lastseen = r['lastseen']
-    if not isinstance(lastseen, datetime):
-        lastseen = datetime.fromtimestamp(lastseen)
     if 'addr' in r and r['addr']:
         if r['source'].startswith('PTR-'):
             print('%s PTR %s (%s, %s time%s, %s - %s)' % (
@@ -114,7 +109,7 @@ def main():
             sys.exit(0)
         else:
             sys.stderr.write(
-                '%r %r not undestood (this is probably a bug).\n' % (o, a))
+                '%r %r not understood (this is probably a bug).\n' % (o, a))
             sys.exit(-1)
     first = True
     flts = []

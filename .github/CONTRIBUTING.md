@@ -6,7 +6,7 @@ the most efficient way.
 ## Project objectives
 
 IVRE does not include scanners or network analyzers, it only feeds a
-database with data from such softwares (Nmap, Masscan, Bro, p0f, etc.)
+database with data from such programs (Nmap, Masscan, Bro, p0f, etc.)
 and provide tools to use the collected data.
 
 We believe that it is important to keep the raw (uninterpreted) data
@@ -67,9 +67,9 @@ of function calls, packet creations, etc.).
 
 ### Dependencies
 
-We try to minimize the number of softwares we depend on. When we
-decide to depend on an external software, we try to be as tolerant as
-possible on the required version.
+We try to minimize the number of programs we depend on. When we decide
+to depend on an external program, we try to be as tolerant as possible
+on the required version.
 
 Introducing a dependency or reducing the acceptable versions for a
 dependency must only be done when it makes the code much easier to
@@ -81,9 +81,9 @@ dependency makes it harder for users to install IVRE.
 We try to comply with the some guidelines for new code:
 
 -   The code **must** be compatible with Python 2.6, 2.7, 3.3, 3.4,
-    3.5 and 3.6. The [future module](http://python-future.org/) can
-    help (IVRE already depends on it, so feel free to use it in your
-    code).
+    3.5, 3.6 and 3.7. The [future module](http://python-future.org/)
+    can help (IVRE already depends on it, so feel free to use it in
+    your code).
 -   The code should be PEP-8 compliant; you can check your code with
     [pep8](https://pypi.python.org/pypi/pep8).
 -   [Pylint](http://www.pylint.org/) can help you write good Python
@@ -103,7 +103,7 @@ We try to comply with the some guidelines for new code:
 We do not accept PEP-8 fixes or similar contributions, because they
 break the code history that we use a lot. If you change code, it's OK
 (and even reconmmended) to include PEP-8 fixes **for the lines you
-need to change** and **only for theese lines**.
+need to change** and **only for these lines**.
 
 ### Tests
 

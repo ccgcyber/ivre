@@ -84,7 +84,7 @@ ivreWebUi
 	    else
 		$scope.notes_page = config.notesbase.replace(/#IP#/g, page);
 	};
-	// graphs:here beacause the buttons are located w/ the filters
+	// graphs:here because the buttons are located w/ the filters
 	$scope.build_ip_plane = function() {
 	    var totalnbrres = $scope.shared.filter.count;
 	    if(totalnbrres === undefined)
@@ -328,8 +328,10 @@ ivreWebUi
 	$scope.results = [];
 	$scope.display_mode = "host";
 	$scope.display_mode_args = [];
-	$scope.script_display_mode_needed_scripts_group = function(scripts) {
+	$scope.script_display_mode_needed_scripts_group = function(scripts, vulns) {
 	    if(scripts === undefined || scripts.length === 0)
+		return false;
+	    if(vulns === true && !scripts.some(function (x) { return x.hasOwnProperty('vulns'); }))
 		return false;
 	    if($scope.display_mode_args.length === 0)
 		return true;
@@ -525,6 +527,11 @@ ivreWebUi
 	    templateUrl: 'templates/view-cpes-only.html'
 	};
     })
+    .directive('displayVulnerability', function() {
+	return {
+	    templateUrl: 'templates/view-vulnerabilities-only.html'
+	};
+    })
     .directive('hostSummary', function() {
 	return {
 	    templateUrl: 'templates/subview-host-summary.html'
@@ -639,6 +646,10 @@ function set_display_mode(mode) {
     else if (mode.substr(0, 8) === "service:") {
         args = mode.substr(8).split(',');
 	mode = "service";
+    }
+    else if (mode.substr(0, 13) === "vulnerability") {
+        args = [];
+	mode = "vulnerability";
     }
     scope.display_mode_args = args;
     scope.display_mode = mode;

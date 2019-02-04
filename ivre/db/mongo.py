@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -30,12 +30,12 @@ except ImportError:
     OrderedDict = dict
 from copy import deepcopy
 import datetime
+import hashlib
 import json
 import os
 import re
 import socket
 import struct
-import time
 import uuid
 
 
@@ -85,9 +85,9 @@ MongoDB < 3.2.
 
 class MongoDB(DB):
 
-    schema_migrations = {}
-    schema_migrations_indexes = {}
-    schema_latest_versions = {}
+    schema_migrations_indexes = []
+    schema_latest_versions = []
+    hint_indexes = []
     needunwind = []
     ipaddr_fields = []
     no_limit = 0
@@ -109,8 +109,7 @@ class MongoDB(DB):
             self.maxtime = int(maxtime)
         except TypeError:
             self.maxtime = None
-        self.indexes = {}
-        self.hint_indexes = {}
+        self.schema_migrations = []
 
     def set_limits(self, cur):
         if self.maxscan is not None:
@@ -119,12 +118,13 @@ class MongoDB(DB):
             cur.max_time_ms(self.maxtime)
         return cur
 
-    def get_hint(self, spec):
+    @classmethod
+    def get_hint(cls, spec):
         """Given a query spec, return an appropriate index in a form
         suitable to be passed to Cursor.hint().
 
         """
-        for fieldname, hint in viewitems(self.hint_indexes):
+        for fieldname, hint in viewitems(cls.hint_indexes[cls.column_passive]):
             if fieldname in spec:
                 return hint
 
@@ -273,12 +273,14 @@ e.g.  .explain()) based on the column and a filter.
                           default=self.serialize)
 
     def create_indexes(self):
-        for colname, indexes in viewitems(self.indexes):
+        for colnum, indexes in enumerate(self.indexes):
+            colname = self.columns[colnum]
             for index in indexes:
                 self.db[colname].create_index(index[0], **index[1])
 
     def ensure_indexes(self):
-        for colname, indexes in viewitems(self.indexes):
+        for colnum, indexes in enumerate(self.indexes):
+            colname = self.columns[colnum]
             for index in indexes:
                 self.db[colname].ensure_index(index[0], **index[1])
 
@@ -289,21 +291,22 @@ want to do something special here, e.g., mix with other records.
         """
         return self.db[colname].update({"_id": recid}, update)
 
-    def migrate_schema(self, colname, version):
+    def migrate_schema(self, colnum, version):
         """Process to schema migrations in column `colname` starting
         from `version`.
 
         """
         failed = 0
-        while version in self.schema_migrations[colname]:
+        while version in self.schema_migrations[colnum]:
             new_version, migration_function = self.schema_migrations[
-                colname][version]
+                colnum
+            ][version]
             utils.LOGGER.info(
-                "Migrating column %s from version %r to %r",
-                colname, version, new_version,
+                "Migrating column %d from version %r to %r",
+                colnum, version, new_version,
             )
             # Ensuring new indexes
-            new_indexes = self.schema_migrations_indexes[colname].get(
+            new_indexes = self.schema_migrations_indexes[colnum].get(
                 new_version, {}
             ).get("ensure", [])
             if new_indexes:
@@ -312,7 +315,7 @@ want to do something special here, e.g., mix with other records.
                 )
             if self.mongodb_32_more:
                 try:
-                    self.db[colname].create_indexes(
+                    self.db[self.columns[colnum]].create_indexes(
                         [
                             pymongo.IndexModel(idx[0], **idx[1])
                             for idx in new_indexes
@@ -324,7 +327,8 @@ want to do something special here, e.g., mix with other records.
             else:
                 for idx in new_indexes:
                     try:
-                        self.db[colname].create_index(idx[0], **idx[1])
+                        self.db[self.columns[colnum]].create_index(idx[0],
+                                                                   **idx[1])
                     except pymongo.errors.OperationFailure:
                         utils.LOGGER.debug("Cannot create index %s", idx,
                                            exc_info=True)
@@ -337,14 +341,17 @@ want to do something special here, e.g., mix with other records.
             )
             updated = False
             # unlimited find()!
-            for i, record in enumerate(self.find(colname,
-                                                 self.searchversion(version),
-                                                 no_cursor_timeout=True)):
+            for i, record in enumerate(
+                    self.find(self.columns[colnum],
+                              self.searchversion(version),
+                              no_cursor_timeout=True).batch_size(50000)
+            ):
                 try:
                     update = migration_function(record)
                     if update is not None:
                         updated = True
-                        self._migrate_update_record(colname, record["_id"],
+                        self._migrate_update_record(self.columns[colnum],
+                                                    record["_id"],
                                                     update)
                 except Exception:
                     utils.LOGGER.warning(
@@ -363,13 +370,14 @@ want to do something special here, e.g., mix with other records.
                 "  Performing other actions on indexes...",
             )
             for action, indexes in viewitems(
-                    self.schema_migrations_indexes[colname].get(
+                    self.schema_migrations_indexes[colnum].get(
                         new_version, {}
                     )
             ):
                 if action == "ensure":
                     continue
-                function = getattr(self.db[colname], "%s_index" % action)
+                function = getattr(self.db[self.columns[colnum]],
+                                   "%s_index" % action)
                 for idx in indexes:
                     try:
                         function(idx[0], **idx[1])
@@ -383,21 +391,21 @@ want to do something special here, e.g., mix with other records.
                 "  ... Done.",
             )
             utils.LOGGER.info(
-                "Migration of column %s from version %r to %r DONE",
-                colname, version, new_version,
+                "Migration of column %d from version %r to %r DONE",
+                colnum, version, new_version,
             )
             version = new_version
         if failed:
             utils.LOGGER.info("Failed to migrate %d documents", failed)
 
-    def cmp_schema_version(self, colname, document):
-        """Returns 0 if the `document`'s schema version matches the
-        code's current version for `colname`, -1 if it is higher (you
+    def cmp_schema_version(self, colnum, document):
+        """Returns 0 if the `document`'s schema version matches the code's
+        current version for column `colnum`, -1 if it is higher (you
         need to update IVRE), and 1 if it is lower (you need to call
         .migrate_schema()).
 
         """
-        val1 = self.schema_latest_versions.get(colname, 0)
+        val1 = self.schema_latest_versions[colnum]
         val2 = document.get("schema_version", 0)
         return (val1 > val2) - (val1 < val2)
 
@@ -671,86 +679,70 @@ class MongoDBActive(MongoDB, DBActive):
                   "traces", "traces.hops",
                   "os.osmatch", "os.osclass", "hostnames",
                   "hostnames.domains", "cpes"]
-
-    def __init__(self, host, dbname, colname_hosts, **kargs):
-        MongoDB.__init__(self, host, dbname, **kargs)
-        DBActive.__init__(self)
-        self.colname_hosts = colname_hosts
-        self.indexes = {
-            self.colname_hosts: [
-                ([('scanid', pymongo.ASCENDING)], {}),
-                ([('schema_version', pymongo.ASCENDING)], {}),
-                ([
-                    ('addr_0', pymongo.ASCENDING),
-                    ('addr_1', pymongo.ASCENDING),
-                ], {}),
-                ([('starttime', pymongo.ASCENDING)], {}),
-                ([('endtime', pymongo.ASCENDING)], {}),
-                ([('source', pymongo.ASCENDING)], {}),
-                ([('categories', pymongo.ASCENDING)], {}),
-                ([('hostnames.domains', pymongo.ASCENDING)], {}),
-                ([('traces.hops.domains', pymongo.ASCENDING)], {}),
-                ([('openports.count', pymongo.ASCENDING)], {}),
-                ([('openports.tcp.ports', pymongo.ASCENDING)], {}),
-                ([('openports.tcp.count', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('openports.udp.ports', pymongo.ASCENDING)], {}),
-                ([('openports.udp.count', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('ports.port', pymongo.ASCENDING)], {}),
-                ([('ports.state_state', pymongo.ASCENDING)], {}),
-                ([('ports.service_name', pymongo.ASCENDING)], {}),
-                ([('ports.scripts.id', pymongo.ASCENDING)], {}),
-                ([('ports.scripts.ls.volumes.volume', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('ports.scripts.ls.volumes.files.filename',
-                   pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([
-                    ('ports.scripts.vulns.id', pymongo.ASCENDING),
-                    ('ports.scripts.vulns.state', pymongo.ASCENDING),
-                ], {"sparse": True}),
-                ([('ports.scripts.vulns.state', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([
-                    ('ports.screenshot', pymongo.ASCENDING),
-                    ('ports.screenwords', pymongo.ASCENDING),
-                ], {"sparse": True}),
-                ([('infos.as_num', pymongo.ASCENDING)], {}),
-                ([
-                    ('traces.hops.ipaddr_0', pymongo.ASCENDING),
-                    ('traces.hops.ipaddr_1', pymongo.ASCENDING),
-                    ('traces.hops.ttl', pymongo.ASCENDING),
-                ], {}),
-                ([
-                    ('infos.country_code', pymongo.ASCENDING),
-                    ('infos.city', pymongo.ASCENDING),
-                ], {}),
-                ([('infos.loc', pymongo.GEOSPHERE)], {}),
-                ([
-                    ('cpes.type', pymongo.ASCENDING),
-                    ('cpes.vendor', pymongo.ASCENDING),
-                    ('cpes.product', pymongo.ASCENDING),
-                    ('cpes.version', pymongo.ASCENDING),
-                ], {"sparse": True}),
-            ],
-        }
-        self.schema_migrations = {
-            self.colname_hosts: {
-                None: (1, self.migrate_schema_hosts_0_1),
-                1: (2, self.migrate_schema_hosts_1_2),
-                2: (3, self.migrate_schema_hosts_2_3),
-                3: (4, self.migrate_schema_hosts_3_4),
-                4: (5, self.migrate_schema_hosts_4_5),
-                5: (6, self.migrate_schema_hosts_5_6),
-                6: (7, self.migrate_schema_hosts_6_7),
-                7: (8, self.migrate_schema_hosts_7_8),
-                8: (9, self.migrate_schema_hosts_8_9),
-                9: (10, self.migrate_schema_hosts_9_10),
-                10: (11, self.migrate_schema_hosts_10_11),
-            },
-        }
-        self.schema_migrations_indexes[colname_hosts] = {
+    column_hosts = 0
+    indexes = [
+        # hosts
+        [
+            ([('scanid', pymongo.ASCENDING)], {}),
+            ([('schema_version', pymongo.ASCENDING)], {}),
+            ([
+                ('addr_0', pymongo.ASCENDING),
+                ('addr_1', pymongo.ASCENDING),
+            ], {}),
+            ([('starttime', pymongo.ASCENDING)], {}),
+            ([('endtime', pymongo.ASCENDING)], {}),
+            ([('source', pymongo.ASCENDING)], {}),
+            ([('categories', pymongo.ASCENDING)], {}),
+            ([('hostnames.domains', pymongo.ASCENDING)], {}),
+            ([('traces.hops.domains', pymongo.ASCENDING)], {}),
+            ([('openports.count', pymongo.ASCENDING)], {}),
+            ([('openports.tcp.ports', pymongo.ASCENDING)], {}),
+            ([('openports.tcp.count', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('openports.udp.ports', pymongo.ASCENDING)], {}),
+            ([('openports.udp.count', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('ports.port', pymongo.ASCENDING)], {}),
+            ([('ports.state_state', pymongo.ASCENDING)], {}),
+            ([('ports.service_name', pymongo.ASCENDING)], {}),
+            ([('ports.scripts.id', pymongo.ASCENDING)], {}),
+            ([('ports.scripts.ls.volumes.volume', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('ports.scripts.ls.volumes.files.filename',
+               pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([
+                ('ports.scripts.vulns.id', pymongo.ASCENDING),
+                ('ports.scripts.vulns.state', pymongo.ASCENDING),
+            ], {"sparse": True}),
+            ([('ports.scripts.vulns.state', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([
+                ('ports.screenshot', pymongo.ASCENDING),
+                ('ports.screenwords', pymongo.ASCENDING),
+            ], {"sparse": True}),
+            ([('infos.as_num', pymongo.ASCENDING)], {}),
+            ([
+                ('traces.hops.ipaddr_0', pymongo.ASCENDING),
+                ('traces.hops.ipaddr_1', pymongo.ASCENDING),
+                ('traces.hops.ttl', pymongo.ASCENDING),
+            ], {}),
+            ([
+                ('infos.country_code', pymongo.ASCENDING),
+                ('infos.city', pymongo.ASCENDING),
+            ], {}),
+            ([('infos.loc', pymongo.GEOSPHERE)], {}),
+            ([
+                ('cpes.type', pymongo.ASCENDING),
+                ('cpes.vendor', pymongo.ASCENDING),
+                ('cpes.product', pymongo.ASCENDING),
+                ('cpes.version', pymongo.ASCENDING),
+            ], {"sparse": True}),
+        ],
+    ]
+    schema_migrations_indexes = [
+        # hosts
+        {
             1: {"ensure": [
                 ([
                     ('ports.screenshot', pymongo.ASCENDING),
@@ -808,15 +800,38 @@ class MongoDBActive(MongoDB, DBActive):
                     ], {}),
                 ],
             },
-        }
-        self.schema_latest_versions = {
-            self.colname_hosts: xmlnmap.SCHEMA_VERSION,
-        }
+        },
+    ]
+    schema_latest_versions = [
+        # hosts
+        xmlnmap.SCHEMA_VERSION,
+    ]
+
+    def __init__(self, host, dbname, colname_hosts, **kargs):
+        MongoDB.__init__(self, host, dbname, **kargs)
+        DBActive.__init__(self)
+        self.columns = [colname_hosts]
+        self.schema_migrations = [
+            # hosts
+            {
+                None: (1, self.migrate_schema_hosts_0_1),
+                1: (2, self.migrate_schema_hosts_1_2),
+                2: (3, self.migrate_schema_hosts_2_3),
+                3: (4, self.migrate_schema_hosts_3_4),
+                4: (5, self.migrate_schema_hosts_4_5),
+                5: (6, self.migrate_schema_hosts_5_6),
+                6: (7, self.migrate_schema_hosts_6_7),
+                7: (8, self.migrate_schema_hosts_7_8),
+                8: (9, self.migrate_schema_hosts_8_9),
+                9: (10, self.migrate_schema_hosts_9_10),
+                10: (11, self.migrate_schema_hosts_10_11),
+            },
+        ]
 
     def init(self):
         """Initializes the "active" columns, i.e., drops those columns and
 creates the default indexes."""
-        self.db[self.colname_hosts].drop()
+        self.db[self.columns[self.column_hosts]].drop()
         self.create_indexes()
 
     def cmp_schema_version_host(self, host):
@@ -825,14 +840,14 @@ creates the default indexes."""
         and 1 if it is lower (you need to call .migrate_schema()).
 
         """
-        return self.cmp_schema_version(self.colname_hosts, host)
+        return self.cmp_schema_version(self.column_hosts, host)
 
     def migrate_schema(self, version):
-        """Process to schema migrations in column `colname_hosts`
-        starting from `version`.
+        """Process to schema migrations in column hosts starting from
+        `version`.
 
         """
-        MongoDB.migrate_schema(self, self.colname_hosts, version)
+        MongoDB.migrate_schema(self, self.column_hosts, version)
 
     @classmethod
     def migrate_schema_hosts_0_1(cls, doc):
@@ -1181,7 +1196,7 @@ index) unsigned 128-bit integers in MongoDB.
 e.g.  .explain()).
 
         """
-        return self._get_cursor(self.colname_hosts, flt, **kargs)
+        return self._get_cursor(self.columns[self.column_hosts], flt, **kargs)
 
     def get(self, spec, **kargs):
         """Queries the active column with the provided filter "spec",
@@ -1253,7 +1268,7 @@ it is not expected)."""
         screenwords = utils.screenwords(data)
         if screenwords is not None:
             port['screenwords'] = screenwords
-        self.db[self.colname_hosts].update(
+        self.db[self.columns[self.column_hosts]].update(
             {"_id": host['_id']}, {"$set": {'ports': host['ports']}}
         )
 
@@ -1291,7 +1306,7 @@ it is not expected)."""
                 port['screenwords'] = screenwords
                 updated = True
         if updated:
-            self.db[self.colname_hosts].update(
+            self.db[self.columns[self.column_hosts]].update(
                 {"_id": host['_id']}, {"$set": {'ports': host['ports']}}
             )
 
@@ -1310,12 +1325,12 @@ it is not expected)."""
                     del p['screenshot']
                     changed = True
         if changed:
-            self.db[self.colname_hosts].update(
+            self.db[self.columns[self.column_hosts]].update(
                 {"_id": host["_id"]}, {"$set": {'ports': host['ports']}}
             )
 
     def getlocations(self, flt):
-        col = self.db[self.colname_hosts]
+        col = self.db[self.columns[self.column_hosts]]
         pipeline = [
             {"$match": self.flt_and(flt, self.searchhaslocation())},
             {"$project": {"_id": 0, "coords": "$infos.loc.coordinates"}},
@@ -1388,8 +1403,9 @@ it is not expected)."""
                 "type": "Point",
                 "coordinates": host['infos'].pop('coordinates')[::-1],
             }
-        ident = self.db[self.colname_hosts].insert(host)
-        utils.LOGGER.debug("HOST STORED: %r in %r", ident, self.colname_hosts)
+        ident = self.db[self.columns[self.column_hosts]].insert(host)
+        utils.LOGGER.debug("HOST STORED: %r in %r", ident,
+                           self.columns[self.column_hosts])
         return ident
 
     def merge_host_docs(self, rec1, rec2):
@@ -1413,7 +1429,7 @@ it is not expected)."""
         "view" must be the record as returned by MongoDB.
 
         """
-        self.db[self.colname_hosts].remove(spec_or_id=host['_id'])
+        self.db[self.columns[self.column_hosts]].remove(spec_or_id=host['_id'])
 
     def store_or_merge_host(self, host):
         raise NotImplementedError
@@ -1464,7 +1480,8 @@ it is not expected)."""
                           "id": "$_id",
                           "mean": {"$multiply": ["$count", "$ports"]}}},
         ]
-        return self.db[self.colname_hosts].aggregate(aggr, cursor={})
+        return self.db[self.columns[self.column_hosts]].aggregate(aggr,
+                                                                  cursor={})
 
     def group_by_port(self, flt):
         """Work-in-progress function to get scan results grouped by
@@ -1493,7 +1510,8 @@ it is not expected)."""
             {"$group": {"_id": "$ports",
                         "ids": {"$addToSet": "$_id"}}},
         ]
-        return self.db[self.colname_hosts].aggregate(aggr, cursor={})
+        return self.db[self.columns[self.column_hosts]].aggregate(aggr,
+                                                                  cursor={})
 
     @staticmethod
     def json2dbrec(host):
@@ -2593,7 +2611,7 @@ it is not expected)."""
             cpeflt2 = dict(("cpes.%s" % key, value) for key, value in cpeflt)
             # We need to keep enough cpes.* fields for the projection
             # *and* for our filter
-            fields = fields[:max(fields.index(field), len(cpeflt)) + 1]
+            fields = fields[:max(fields.index(field), len(cpeflt2)) + 1]
             flt = self.flt_and(flt, cpeflt1)
             specialproj = dict(("cpes.%s" % fname, 1) for fname in fields)
             specialproj["_id"] = 0
@@ -3024,7 +3042,8 @@ it is not expected)."""
             specialproj=specialproj, specialflt=specialflt,
         )
         cursor = self.set_limits(
-            self.db[self.colname_hosts].aggregate(pipeline, cursor={})
+            self.db[self.columns[self.column_hosts]].aggregate(pipeline,
+                                                               cursor={})
         )
         if outputproc is not None:
             return (outputproc(res) for res in cursor)
@@ -3035,8 +3054,8 @@ it is not expected)."""
         produce distinct values for a given field.
 
         """
-        return self._distinct(self.colname_hosts, field, flt=flt, sort=sort,
-                              limit=limit, skip=skip)
+        return self._distinct(self.columns[self.column_hosts], field, flt=flt,
+                              sort=sort, limit=limit, skip=skip)
 
     def diff_categories(self, category1, category2, flt=None,
                         include_both_open=True):
@@ -3078,7 +3097,9 @@ it is not expected)."""
                                 "port": "$ports.port"},
                         "categories": {"$push": "$categories"}}},
         ]
-        cursor = self.db[self.colname_hosts].aggregate(pipeline, cursor={})
+        cursor = self.db[self.columns[self.column_hosts]].aggregate(
+            pipeline, cursor={}
+        )
 
         def categories_to_val(categories):
             state1, state2 = category1 in categories, category2 in categories
@@ -3099,25 +3120,29 @@ it is not expected)."""
 
 class MongoDBNmap(MongoDBActive, DBNmap):
 
+    column_scans = 1
+
     def __init__(self, host, dbname, colname_scans="scans",
                  colname_hosts="hosts", **kwargs):
         MongoDBActive.__init__(self, host, dbname, colname_hosts=colname_hosts,
                                **kwargs)
         DBNmap.__init__(self)
-        self.colname_scans = colname_scans
+        self.columns.append(colname_scans)
+        self.schema_migrations.append({})  # scans
         self.content_handler = Nmap2Mongo
         self.output_function = None
 
     def store_scan_doc(self, scan):
-        ident = self.db[self.colname_scans].insert(scan)
-        utils.LOGGER.debug("SCAN STORED: %r in %r", ident, self.colname_scans)
+        ident = self.db[self.columns[self.column_scans]].insert(scan)
+        utils.LOGGER.debug("SCAN STORED: %r in %r", ident,
+                           self.columns[self.column_scans])
         return ident
 
     def store_or_merge_host(self, host):
         self.store_host(host)
 
     def init(self):
-        self.db[self.colname_scans].drop()
+        self.db[self.columns[self.column_scans]].drop()
         super(MongoDBNmap, self).init()
 
     def cmp_schema_version_scan(self, scan):
@@ -3126,13 +3151,13 @@ class MongoDBNmap(MongoDBActive, DBNmap):
         and 1 if it is lower (you need to call .migrate_schema()).
 
         """
-        return self.cmp_schema_version(self.colname_scans, scan)
+        return self.cmp_schema_version(self.column_scans, scan)
 
     def getscan(self, scanid):
-        return self.find_one(self.colname_scans, {'_id': scanid})
+        return self.find_one(self.columns[self.column_scans], {'_id': scanid})
 
     def is_scan_present(self, scanid):
-        if self.find_one(self.colname_scans, {"_id": scanid},
+        if self.find_one(self.columns[self.column_scans], {"_id": scanid},
                          fields=[]) is not None:
             return True
         return False
@@ -3148,8 +3173,11 @@ class MongoDBNmap(MongoDBActive, DBNmap):
         """
         super(MongoDBNmap, self).remove(host)
         for scanid in self.getscanids(host):
-            if self.find_one(self.colname_hosts, {'scanid': scanid}) is None:
-                self.db[self.colname_scans].remove(spec_or_id=scanid)
+            if self.find_one(self.columns[self.column_hosts],
+                             {'scanid': scanid}) is None:
+                self.db[self.columns[self.column_scans]].remove(
+                    spec_or_id=scanid
+                )
 
 
 class MongoDBView(MongoDBActive, DBView):
@@ -3168,62 +3196,58 @@ class MongoDBPassive(MongoDB, DBPassive):
 
     needunwind = ["infos.san"]
     ipaddr_fields = ["addr"]
-
-    def __init__(self, host, dbname,
-                 colname_passive="passive",
-                 **kargs):
-        MongoDB.__init__(self, host, dbname, **kargs)
-        DBPassive.__init__(self)
-        self.colname_passive = colname_passive
-        self.indexes = {
-            self.colname_passive: [
-                ([('schema_version', pymongo.ASCENDING)], {}),
-                ([('port', pymongo.ASCENDING)], {}),
-                ([('value', pymongo.ASCENDING)], {}),
-                ([('targetval', pymongo.ASCENDING)], {}),
-                ([('recontype', pymongo.ASCENDING)], {}),
-                ([('firstseen', pymongo.ASCENDING)], {}),
-                ([('lastseen', pymongo.ASCENDING)], {}),
-                ([('sensor', pymongo.ASCENDING)], {}),
-                ([
-                    ('addr_0', pymongo.ASCENDING),
-                    ('addr_1', pymongo.ASCENDING),
-                    ('recontype', pymongo.ASCENDING),
-                    ('port', pymongo.ASCENDING),
-                ], {}),
-                # HTTP Auth basic
-                ([('infos.username', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('infos.password', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                # DNS
-                ([('infos.domain', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('infos.domaintarget', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                # SSL
-                ([('infos.md5', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('infos.sha1', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('infos.sha256', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('infos.issuer_text', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('infos.subject_text', pymongo.ASCENDING)],
-                 {"sparse": True}),
-                ([('infos.pubkeyalgo', pymongo.ASCENDING)],
-                 {"sparse": True}),
-            ],
-        }
-        self.schema_migrations = {
-            self.colname_passive: {
-                None: (1, self.migrate_schema_passive_0_1),
-            },
-        }
-        self.schema_migrations_indexes[colname_passive] = {
+    column_passive = 0
+    indexes = [
+        # passive
+        [
+            ([('schema_version', pymongo.ASCENDING)], {}),
+            ([('port', pymongo.ASCENDING)], {}),
+            ([('value', pymongo.ASCENDING)], {}),
+            ([('targetval', pymongo.ASCENDING)], {}),
+            ([
+                ('recontype', pymongo.ASCENDING),
+                ('source', pymongo.ASCENDING)
+            ], {}),
+            ([('firstseen', pymongo.ASCENDING)], {}),
+            ([('lastseen', pymongo.ASCENDING)], {}),
+            ([('sensor', pymongo.ASCENDING)], {}),
+            ([
+                ('addr_0', pymongo.ASCENDING),
+                ('addr_1', pymongo.ASCENDING),
+                ('recontype', pymongo.ASCENDING),
+                ('port', pymongo.ASCENDING),
+            ], {}),
+            # HTTP Auth basic
+            ([('infos.username', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('infos.password', pymongo.ASCENDING)],
+             {"sparse": True}),
+            # DNS
+            ([('infos.domain', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('infos.domaintarget', pymongo.ASCENDING)],
+             {"sparse": True}),
+            # SSL
+            ([('infos.md5', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('infos.sha1', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('infos.sha256', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('infos.issuer_text', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('infos.subject_text', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('infos.pubkeyalgo', pymongo.ASCENDING)],
+             {"sparse": True}),
+        ],
+    ]
+    schema_migrations_indexes = [
+        # passive
+        {
             1: {
                 "drop": [
+                    ([('recontype', pymongo.ASCENDING)], {}),
                     ([
                         ('addr', pymongo.ASCENDING),
                         ('recontype', pymongo.ASCENDING),
@@ -3235,6 +3259,10 @@ class MongoDBPassive(MongoDB, DBPassive):
                      {"sparse": True}),
                 ],
                 "ensure": [
+                    ([
+                        ('recontype', pymongo.ASCENDING),
+                        ('source', pymongo.ASCENDING)
+                    ], {}),
                     ([
                         ('addr_0', pymongo.ASCENDING),
                         ('addr_1', pymongo.ASCENDING),
@@ -3251,16 +3279,37 @@ class MongoDBPassive(MongoDB, DBPassive):
                 ],
             },
         }
-        self.hint_indexes = OrderedDict([
+    ]
+    schema_latest_versions = [
+        # hosts
+        xmlnmap.SCHEMA_VERSION,
+    ]
+    hint_indexes = [
+        # passive
+        OrderedDict([
             ["addr_0", [("addr_0", 1), ("addr_1", 1), ("recontype", 1),
                         ("port", 1)]],
             ["targetval", [("targetval", 1)]],
-        ])
+        ]),
+    ]
+
+    def __init__(self, host, dbname,
+                 colname_passive="passive",
+                 **kargs):
+        MongoDB.__init__(self, host, dbname, **kargs)
+        DBPassive.__init__(self)
+        self.columns = [colname_passive]
+        self.schema_migrations = [
+            # passive
+            {
+                None: (1, self.migrate_schema_passive_0_1),
+            },
+        ]
 
     def init(self):
         """Initializes the "passive" columns, i.e., drops the columns, and
 creates the default indexes."""
-        self.db[self.colname_passive].drop()
+        self.db[self.columns[self.column_passive]].drop()
         self.create_indexes()
 
     def cmp_schema_version_passive(self, rec):
@@ -3269,21 +3318,21 @@ creates the default indexes."""
         and 1 if it is lower (you need to call .migrate_schema()).
 
         """
-        return self.cmp_schema_version(self.colname_passive, rec)
+        return self.cmp_schema_version(self.column_passive, rec)
 
     def migrate_schema(self, version):
-        """Process to schema migrations in column `colname_passive`
-        starting from `version`.
+        """Process to schema migrations in column passive starting from
+        `version`.
 
         """
-        MongoDB.migrate_schema(self, self.colname_passive, version)
+        MongoDB.migrate_schema(self, self.column_passive, version)
 
     def _migrate_update_record(self, colname, recid, update):
         """Define how an update is handled. Purpose-specific subclasses may
 want to do something special here, e.g., mix with other records.
 
         """
-        if colname == self.colname_passive:  # just in case
+        if colname == self.columns[self.column_passive]:  # just in case
             del update['_id']
             self.insert_or_update_mix(update, getinfos=passive.getinfos)
             self.remove(recid)
@@ -3310,6 +3359,7 @@ Also, the structured data for SSL certificates has been updated.
 
         """
         assert "schema_version" not in doc
+        doc = cls.internal2rec(doc)
         doc["schema_version"] = 1
         for key in ["firstseen", "lastseen"]:
             doc[key] = datetime.datetime.fromtimestamp(doc[key])
@@ -3321,7 +3371,7 @@ Also, the structured data for SSL certificates has been updated.
                 doc["recontype"] == "SSL_SERVER" and
                 doc["source"] == "cert"
         ):
-            doc.update(passive._getinfos_cert(doc, cls.to_binary))
+            doc.update(passive._getinfos_cert(doc))
         return doc
 
     def _get(self, flt, **kargs):
@@ -3329,7 +3379,44 @@ Also, the structured data for SSL certificates has been updated.
 e.g.  .explain()).
 
         """
-        return self._get_cursor(self.colname_passive, flt, **kargs)
+        return self._get_cursor(self.columns[self.column_passive], flt,
+                                **kargs)
+
+    @classmethod
+    def rec2internal(cls, rec):
+        """Given a record as presented to the user, fixes it before it can be
+inserted in the database.
+
+        """
+        try:
+            rec['addr_0'], rec['addr_1'] = cls.ip2internal(rec.pop('addr'))
+        except (KeyError, ValueError):
+            pass
+        if rec.get('recontype') == 'SSL_SERVER' and \
+           rec.get('source') == 'cert':
+            rec['value'] = cls.to_binary(
+                utils.decode_b64(rec['value'].encode())
+            )
+        cls._fix_sizes(rec)
+        return rec
+
+    @classmethod
+    def internal2rec(cls, rec):
+        """Given a record as stored in the database, fixes it before it can be
+returned to backend-agnostic functions.
+
+        """
+        try:
+            rec['addr'] = cls.internal2ip([rec.pop('addr_0'),
+                                           rec.pop('addr_1')])
+        except (KeyError, socket.error):
+            pass
+        for key in ['value', 'targetval']:
+            if 'full' + key in rec:
+                rec[key] = rec.pop('full' + key)
+        if 'fullinfos' in rec:
+            rec.setdefault('infos', {}).update(rec.pop('fullinfos'))
+        return rec
 
     def get(self, spec, hint=None, **kargs):
         """Queries the passive column with the provided filter "spec", and
@@ -3346,12 +3433,7 @@ is not expected)."""
         if hint is not None:
             cursor.hint(hint)
         for rec in cursor:
-            try:
-                rec['addr'] = self.internal2ip([rec.pop('addr_0'),
-                                                rec.pop('addr_1')])
-            except (KeyError, socket.error):
-                pass
-            yield rec
+            yield self.internal2rec(rec)
 
     def get_one(self, spec, **kargs):
         """Same function as get, except .find_one() method is called
@@ -3359,39 +3441,64 @@ instead of .find(), so the first record matching "spec" (or None) is
 returned.
 
 Unlike get(), this function might take a long time, depending
-on "spec" and the indexes set on colname_passive column."""
+on "spec" and the indexes set on passive column."""
         # TODO: check limits
-        rec = self.find_one(self.colname_passive, spec, **kargs)
-        try:
-            rec['addr'] = self.internal2ip([rec['addr_0'], rec['addr_1']])
-        except (TypeError, KeyError, socket.error):
-            pass
-        else:
-            del rec['addr_0'], rec['addr_1']
-        return rec
+        rec = self.find_one(self.columns[self.column_passive], spec, **kargs)
+        if rec is None:
+            return None
+        return self.internal2rec(rec)
 
     def update(self, spec, **kargs):
         """Updates the first record matching "spec" in the "passive" column,
 setting values according to the keyword arguments.
 """
-        self.db[self.colname_passive].update(spec, {'$set': kargs})
+        self.db[self.columns[self.column_passive]].update(
+            spec, {'$set': kargs}
+        )
+
+    @classmethod
+    def _fix_sizes(cls, spec):
+        # Finally we prepare the record to be stored. For that, we make
+        # sure that no indexed value has a size greater than MAXVALLEN. If
+        # so, we replace the value with its SHA1 hash and store the
+        # original value in full[original column name].
+        for key in ['value', 'targetval']:
+            if len(spec.get(key, "")) > utils.MAXVALLEN:
+                spec['full' + key] = spec[key]
+                value = spec[key]
+                if not isinstance(value, bytes):
+                    value = value.encode()
+                spec[key] = hashlib.sha1(value).hexdigest()
+        # We enforce a utils.MAXVALLEN // 10 size limits for subkey values in
+        # infos; this is because MongoDB cannot index values longer than 1024
+        # bytes.
+        for field in list(spec.get("infos", {})):
+            # Do not limit size of non-indexed values
+            if field not in (idx[6:]
+                             for idxes, _ in cls.indexes[cls.column_passive]
+                             for idx, _ in idxes if idx.startswith('infos')):
+                continue
+            value = spec["infos"][field]
+            if isinstance(value, basestring) and \
+               len(value) > utils.MAXVALLEN // 10:
+                spec.setdefault("fullinfos", {})[field] = value
+                spec["infos"][field] = value[:utils.MAXVALLEN // 10]
 
     def insert(self, spec, getinfos=None):
         """Inserts the record "spec" into the passive column."""
         if getinfos is not None:
-            spec.update(getinfos(spec, self.to_binary))
-        try:
-            spec['addr_0'], spec['addr_1'] = self.ip2internal(spec.pop('addr'))
-        except (KeyError, ValueError):
-            pass
-        self.db[self.colname_passive].insert(spec)
+            spec.update(getinfos(spec))
+        spec = self.rec2internal(spec)
+        self.db[self.columns[self.column_passive]].insert(spec)
 
     def insert_or_update(self, timestamp, spec, getinfos=None, lastseen=None):
         if spec is None:
             return
+        orig = deepcopy(spec)
+        spec = self.rec2internal(spec)
         try:
-            spec['addr_0'], spec['addr_1'] = self.ip2internal(spec.pop('addr'))
-        except (KeyError, ValueError):
+            del spec['infos']
+        except KeyError:
             pass
         hint = self.get_hint(spec)
         current = self.get(spec, hint=hint, fields=[])
@@ -3405,16 +3512,21 @@ setting values according to the keyword arguments.
             '$max': {'lastseen': lastseen or timestamp},
         }
         if current is not None:
-            self.db[self.colname_passive].update(
+            self.db[self.columns[self.column_passive]].update(
                 {'_id': current['_id']},
                 updatespec,
             )
         else:
             if getinfos is not None:
-                infos = getinfos(spec, self.to_binary)
-                if infos:
+                orig.update(getinfos(orig))
+                try:
+                    infos = {'infos': orig['infos']}
+                except KeyError:
+                    pass
+                else:
+                    self._fix_sizes(infos)
                     updatespec['$setOnInsert'] = infos
-            self.db[self.colname_passive].update(
+            self.db[self.columns[self.column_passive]].update(
                 spec,
                 updatespec,
                 upsert=True,
@@ -3434,7 +3546,9 @@ setting values according to the keyword arguments.
         method.
 
         """
-        bulk = self.db[self.colname_passive].initialize_unordered_bulk_op()
+        bulk = self.db[
+            self.columns[self.column_passive]
+        ].initialize_unordered_bulk_op()
         count = 0
 
         if separated_timestamps:
@@ -3451,27 +3565,33 @@ setting values according to the keyword arguments.
             for firstseen, lastseen, spec in generator(specs):
                 if spec is None:
                     continue
-                try:
-                    spec['addr_0'], spec['addr_1'] = self.ip2internal(
-                        spec.pop('addr')
-                    )
-                except (KeyError, ValueError):
-                    pass
                 updatespec = {
                     '$inc': {'count': 1},
                     '$min': {'firstseen': firstseen},
                     '$max': {'lastseen': lastseen},
                 }
                 if getinfos is not None:
-                    infos = getinfos(spec, self.to_binary)
-                    if infos:
+                    spec.update(getinfos(spec))
+                    try:
+                        infos = {'infos': spec['infos']}
+                    except KeyError:
+                        pass
+                    else:
+                        self._fix_sizes(infos)
                         updatespec['$setOnInsert'] = infos
-                bulk.find(spec).upsert().update(updatespec)
+                spec = self.rec2internal(spec)
+                findspec = deepcopy(spec)
+                for key in ['infos', 'fullinfos']:
+                    try:
+                        del findspec[key]
+                    except KeyError:
+                        pass
+                bulk.find(findspec).upsert().update(updatespec)
                 count += 1
                 if count >= config.MONGODB_BATCH_SIZE:
                     utils.LOGGER.debug("DB:MongoDB bulk upsert: %d", count)
                     bulk.execute()
-                    bulk = self.db[self.colname_passive]\
+                    bulk = self.db[self.columns[self.column_passive]]\
                                .initialize_unordered_bulk_op()
                     count = 0
         except IOError:
@@ -3485,14 +3605,11 @@ setting values according to the keyword arguments.
         "firstseen", "lastseen" and "count") by mixing "firstseen",
         "lastseen" and "count" from "spec" and from the database.
 
-        This is usefull to mix records from different databases.
+        This is useful to mix records from different databases.
 
         """
         updatespec = {}
-        try:
-            spec['addr_0'], spec['addr_1'] = self.ip2internal(spec.pop('addr'))
-        except (KeyError, ValueError):
-            pass
+        spec = self.rec2internal(spec)
         if 'firstseen' in spec:
             updatespec['$min'] = {'firstseen': spec.pop('firstseen')}
         if 'lastseen' in spec:
@@ -3514,23 +3631,25 @@ setting values according to the keyword arguments.
                 }
         current = self.get_one(spec, fields=[])
         if current:
-            self.db[self.colname_passive].update(
+            self.db[self.columns[self.column_passive]].update(
                 {'_id': current['_id']},
                 updatespec,
             )
         else:
             if getinfos is not None and "$setOnInsert" not in updatespec:
-                infos = getinfos(spec, self.to_binary)
+                infos = getinfos(spec)
                 if infos:
                     updatespec['$setOnInsert'] = infos
-            self.db[self.colname_passive].update(
+            self.db[self.columns[self.column_passive]].update(
                 spec,
                 updatespec,
                 upsert=True,
             )
 
     def remove(self, spec_or_id):
-        self.db[self.colname_passive].remove(spec_or_id=spec_or_id)
+        self.db[self.columns[self.column_passive]].remove(
+            spec_or_id=spec_or_id
+        )
 
     def topvalues(self, field, flt=None, distinct=True, **kargs):
         """This method makes use of the aggregation framework to
@@ -3610,7 +3729,9 @@ setting values according to the keyword arguments.
         pipeline = self._topvalues(field, flt=flt, specialproj=specialproj,
                                    **kargs)
         cursor = self.set_limits(
-            self.db[self.colname_passive].aggregate(pipeline, cursor={})
+            self.db[self.columns[self.column_passive]].aggregate(
+                pipeline, cursor={},
+            )
         )
         if outputproc is not None:
             return (outputproc(res) for res in cursor)
@@ -3621,8 +3742,8 @@ setting values according to the keyword arguments.
         produce distinct values for a given field.
 
         """
-        return self._distinct(self.colname_passive, field, flt=flt, sort=sort,
-                              limit=limit, skip=skip)
+        return self._distinct(self.columns[self.column_passive], field,
+                              flt=flt, sort=sort, limit=limit, skip=skip)
 
     @staticmethod
     def searchrecontype(rectype):
@@ -3711,6 +3832,50 @@ setting values according to the keyword arguments.
                 'infos.pubkeyalgo': keytype + 'Encryption'}
 
     @staticmethod
+    def _searchsja3(value_or_hash):
+        if value_or_hash is None:
+            return {}
+        if utils.HEX.search(value_or_hash):
+            key = {32: 'value', 40: 'infos.sha1',
+                   64: 'infos.sha256'}.get(len(value_or_hash), 'infos.raw')
+        else:
+            key = 'infos.raw'
+        if key == 'infos.raw':
+            return {'infos.raw': value_or_hash,
+                    'value': hashlib.new('md5',
+                                         value_or_hash.encode()).hexdigest()}
+        return {key: value_or_hash}
+
+    @classmethod
+    def searchja3client(cls, value_or_hash=None):
+        return dict(cls._searchsja3(value_or_hash), recontype='SSL_CLIENT',
+                    source='ja3')
+
+    @classmethod
+    def searchja3server(cls, value_or_hash=None, client_value_or_hash=None):
+        base = dict(cls._searchsja3(value_or_hash), recontype='SSL_SERVER')
+        if client_value_or_hash is None:
+            return dict(base, source=re.compile('^ja3-'))
+        if utils.HEX.search(client_value_or_hash):
+            key = {32: 'md5', 40: 'infos.client.sha1',
+                   64: 'infos.client.sha256'}.get(len(client_value_or_hash),
+                                                  'infos.client.raw')
+        else:
+            key = 'infos.client.raw'
+        if key == 'md5':
+            return dict(base, source='ja3-%s' % client_value_or_hash)
+        if key == 'infos.client.raw':
+            return dict(
+                base, source='ja3-%s' % hashlib.new(
+                    'md5',
+                    client_value_or_hash.encode(),
+                ).hexdigest(),
+                **{'infos.client.raw': client_value_or_hash}
+            )
+        return dict(base, source=re.compile('^ja3-'),
+                    **{key: client_value_or_hash})
+
+    @staticmethod
     def searchsshkey(keytype=None):
         if keytype is None:
             return {'recontype': 'SSH_SERVER_HOSTKEY',
@@ -3764,19 +3929,44 @@ setting values according to the keyword arguments.
 
     @staticmethod
     def searchtimeago(delta, neg=False, new=False):
-        if isinstance(delta, datetime.timedelta):
-            delta = delta.total_seconds()
+        if not isinstance(delta, datetime.timedelta):
+            delta = datetime.timedelta(seconds=delta)
         return {'lastseen' if new else 'firstseen':
-                {'$lt' if neg else '$gte': time.time() - delta}}
+                {'$lt' if neg else '$gte': datetime.datetime.now() - delta}}
 
     @staticmethod
     def searchnewer(timestamp, neg=False, new=False):
+        if not isinstance(timestamp, datetime.datetime):
+            timestamp = datetime.datetime.fromtimestamp(timestamp)
         return {'lastseen' if new else 'firstseen':
                 {'$lte' if neg else '$gt': timestamp}}
 
 
 class MongoDBAgent(MongoDB, DBAgent):
     """MongoDB-specific code to handle agents-in-DB"""
+
+    column_agents = 0
+    column_scans = 1
+    column_masters = 2
+    indexes = [
+        # agents
+        [
+            ([('host', pymongo.ASCENDING)], {}),
+            ([('path.remote', pymongo.ASCENDING)], {}),
+            ([('path.local', pymongo.ASCENDING)], {}),
+            ([('master', pymongo.ASCENDING)], {}),
+            ([('scan', pymongo.ASCENDING)], {}),
+        ],
+        # scans
+        [
+            ([('agents', pymongo.ASCENDING)], {}),
+        ],
+        # masters
+        [
+            ([('hostname', pymongo.ASCENDING),
+              ('path', pymongo.ASCENDING)], {}),
+        ],
+    ]
 
     def __init__(self, host, dbname,
                  colname_agents="agents",
@@ -3785,34 +3975,16 @@ class MongoDBAgent(MongoDB, DBAgent):
                  **kargs):
         MongoDB.__init__(self, host, dbname, **kargs)
         DBAgent.__init__(self)
-        self.colname_agents = colname_agents
-        self.colname_scans = colname_scans
-        self.colname_masters = colname_masters
-        self.indexes = {
-            self.colname_agents: [
-                ([('host', pymongo.ASCENDING)], {}),
-                ([('path.remote', pymongo.ASCENDING)], {}),
-                ([('path.local', pymongo.ASCENDING)], {}),
-                ([('master', pymongo.ASCENDING)], {}),
-                ([('scan', pymongo.ASCENDING)], {}),
-            ],
-            self.colname_scans: [
-                ([('agents', pymongo.ASCENDING)], {}),
-            ],
-            self.colname_masters: [
-                ([('hostname', pymongo.ASCENDING),
-                  ('path', pymongo.ASCENDING)], {}),
-            ],
-        }
+        self.columns = [colname_agents, colname_scans, colname_masters]
 
     def init(self):
         """Initializes the "agent" columns, i.e., drops those columns
         and creates the default indexes.
 
         """
-        self.db[self.colname_agents].drop()
-        self.db[self.colname_scans].drop()
-        self.db[self.colname_masters].drop()
+        self.db[self.columns[self.column_agents]].drop()
+        self.db[self.columns[self.column_scans]].drop()
+        self.db[self.columns[self.column_masters]].drop()
         self.create_indexes()
 
     def stop_agent(self, agentid):
@@ -3823,29 +3995,30 @@ class MongoDBAgent(MongoDB, DBAgent):
             self.unassign_agent(agent['_id'])
 
     def _add_agent(self, agent):
-        return self.db[self.colname_agents].insert(agent)
+        return self.db[self.columns[self.column_agents]].insert(agent)
 
     def get_agent(self, agentid):
-        return self.find_one(self.colname_agents, {"_id": agentid})
+        return self.find_one(self.columns[self.column_agents],
+                             {"_id": agentid})
 
     def get_free_agents(self):
         return (x['_id'] for x in
                 self.set_limits(
-                    self.find(self.colname_agents,
+                    self.find(self.columns[self.column_agents],
                               {"scan": None},
                               fields=["_id"])))
 
     def get_agents_by_master(self, masterid):
         return (x['_id'] for x in
                 self.set_limits(
-                    self.find(self.colname_agents,
+                    self.find(self.columns[self.column_agents],
                               {"master": masterid},
                               fields=["_id"])))
 
     def get_agents(self):
         return (x['_id'] for x in
                 self.set_limits(
-                    self.find(self.colname_agents,
+                    self.find(self.columns[self.column_agents],
                               fields=["_id"])))
 
     def assign_agent(self, agentid, scanid,
@@ -3856,14 +4029,14 @@ class MongoDBAgent(MongoDB, DBAgent):
             flt.update({"scan": None})
         elif not force:
             flt.update({"scan": {"$ne": False}})
-        self.db[self.colname_agents].update(
+        self.db[self.columns[self.column_agents]].update(
             flt,
             {"$set": {"scan": scanid}}
         )
         agent = self.get_agent(agentid)
         if scanid is not None and scanid is not False \
            and scanid == agent["scan"]:
-            self.db[self.colname_scans].update(
+            self.db[self.columns[self.column_scans]].update(
                 {"_id": scanid, "agents": {"$ne": agentid}},
                 {"$push": {"agents": agentid}}
             )
@@ -3872,7 +4045,7 @@ class MongoDBAgent(MongoDB, DBAgent):
         agent = self.get_agent(agentid)
         scanid = agent["scan"]
         if scanid is not None:
-            self.db[self.colname_scans].update(
+            self.db[self.columns[self.column_scans]].update(
                 {"_id": scanid, "agents": agentid},
                 {"$pull": {"agents": agentid}}
             )
@@ -3882,13 +4055,15 @@ class MongoDBAgent(MongoDB, DBAgent):
             self.assign_agent(agentid, None, force=True)
 
     def _del_agent(self, agentid):
-        return self.db[self.colname_agents].remove(spec_or_id=agentid)
+        return self.db[self.columns[self.column_agents]].remove(
+            spec_or_id=agentid
+        )
 
     def _add_scan(self, scan):
-        return self.db[self.colname_scans].insert(scan)
+        return self.db[self.columns[self.column_scans]].insert(scan)
 
     def get_scan(self, scanid):
-        scan = self.find_one(self.colname_scans, {"_id": scanid},
+        scan = self.find_one(self.columns[self.column_scans], {"_id": scanid},
                              fields={'target': 0})
         if scan.get('lock') is not None:
             scan['lock'] = uuid.UUID(bytes=scan['lock'])
@@ -3896,7 +4071,7 @@ class MongoDBAgent(MongoDB, DBAgent):
             target = self.get_scan_target(scanid)
             if target is not None:
                 target_info = target.target.infos
-                self.db[self.colname_scans].update(
+                self.db[self.columns[self.column_scans]].update(
                     {"_id": scanid},
                     {"$set": {"target_info": target_info}},
                 )
@@ -3904,7 +4079,7 @@ class MongoDBAgent(MongoDB, DBAgent):
         return scan
 
     def _get_scan_target(self, scanid):
-        scan = self.find_one(self.colname_scans, {"_id": scanid},
+        scan = self.find_one(self.columns[self.column_scans], {"_id": scanid},
                              fields={'target': 1, '_id': 0})
         return None if scan is None else scan['target']
 
@@ -3917,7 +4092,7 @@ scan object on success, and raises a LockError on failure.
             oldlockid = bson.Binary(oldlockid)
         if newlockid is not None:
             newlockid = bson.Binary(newlockid)
-        scan = self.db[self.colname_scans].find_and_modify({
+        scan = self.db[self.columns[self.column_scans]].find_and_modify({
             "_id": scanid,
             "lock": oldlockid,
         }, {
@@ -3934,7 +4109,7 @@ scan object on success, and raises a LockError on failure.
             target = self.get_scan_target(scanid)
             if target is not None:
                 target_info = target.target.infos
-                self.db[self.colname_scans].update(
+                self.db[self.columns[self.column_scans]].update(
                     {"_id": scanid},
                     {"$set": {"target_info": target_info}},
                 )
@@ -3946,25 +4121,26 @@ scan object on success, and raises a LockError on failure.
     def get_scans(self):
         return (x['_id'] for x in
                 self.set_limits(
-                    self.find(self.colname_scans,
+                    self.find(self.columns[self.column_scans],
                               fields=["_id"])))
 
     def _update_scan_target(self, scanid, target):
-        return self.db[self.colname_scans].update(
+        return self.db[self.columns[self.column_scans]].update(
             {"_id": scanid}, {"$set": {"target": target}})
 
     def incr_scan_results(self, scanid):
-        return self.db[self.colname_scans].update(
+        return self.db[self.columns[self.column_scans]].update(
             {"_id": scanid}, {"$inc": {"results": 1}})
 
     def _add_master(self, master):
-        return self.db[self.colname_masters].insert(master)
+        return self.db[self.columns[self.column_masters]].insert(master)
 
     def get_master(self, masterid):
-        return self.find_one(self.colname_masters, {"_id": masterid})
+        return self.find_one(self.columns[self.column_masters],
+                             {"_id": masterid})
 
     def get_masters(self):
         return (x['_id'] for x in
                 self.set_limits(
-                    self.find(self.colname_masters,
+                    self.find(self.columns[self.column_masters],
                               fields=["_id"])))
