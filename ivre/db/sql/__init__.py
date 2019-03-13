@@ -35,8 +35,8 @@ from builtins import int, range
 from future.utils import PY3, viewitems, viewvalues
 from past.builtins import basestring
 from sqlalchemy import create_engine, desc, func, column, delete, \
-    exists, join, select, update, and_, not_, or_
-
+    exists, join, select, update, and_, not_, or_, cast
+from sqlalchemy.dialects.postgresql import JSONB
 
 from ivre.db import DB, DBActive, DBFlow, DBNmap, DBPassive, DBView
 from ivre import config, utils, xmlnmap
@@ -228,6 +228,7 @@ class SQLDB(DB):
     no_limit = None
 
     def __init__(self, url):
+        super(SQLDB, self).__init__()
         self.dburl = url
 
     @property
@@ -455,8 +456,7 @@ class SQLDBFlow(SQLDB, DBFlow):
     tables = table_layout(Flow)
 
     def __init__(self, url):
-        DBFlow.__init__(self)
-        SQLDB.__init__(self, url)
+        super(SQLDBFlow, self).__init__(url)
 
     @staticmethod
     def query(*args, **kargs):
@@ -691,19 +691,22 @@ class ViewFilter(ActiveFilter):
 class SQLDBActive(SQLDB, DBActive):
     _needunwind_script = set([
         "http-headers",
+        "http-user-agent",
+        "ssh-hostkey",
+        "ssl-ja3-client",
+        "ssl-ja3-server"
     ])
 
     @classmethod
     def needunwind_script(cls, key):
         key = key.split('.')
         for i in range(len(key)):
-            subkey = '.'.join(key[:i])
+            subkey = '.'.join(key[:i + 1])
             if subkey in cls._needunwind_script:
                 yield subkey
 
     def __init__(self, url):
-        SQLDB.__init__(self, url)
-        DBActive.__init__(self)
+        super(SQLDBActive, self).__init__(url)
         self.output_function = None
         self.bulk = None
 
@@ -1240,16 +1243,23 @@ the way IP addresses are stored.
                 raise TypeError(".searchscript() needs a `name` arg "
                                 "when using a `values` arg")
             basekey = xmlnmap.ALIASES_TABLE_ELEMS.get(name, name)
-            needunwind = sorted(set(
-                unwind
-                for subkey in values
-                for unwind in cls.needunwind_script("%s.%s" % (basekey,
-                                                               subkey))
-            ))
+            if isinstance(values, (basestring, utils.REGEXP_T)):
+                needunwind = sorted(set(cls.needunwind_script(basekey)))
+            else:
+                needunwind = sorted(set(
+                    unwind
+                    for subkey in values
+                    for unwind in cls.needunwind_script(
+                        "%s.%s" % (basekey, subkey),
+                    )
+                ))
 
             def _find_subkey(key):
                 lastmatch = None
-                key = key.split('.')
+                if key is None:
+                    key = []
+                else:
+                    key = key.split('.')
                 for subkey in needunwind:
                     subkey = subkey.split('.')[1:]
                     if len(key) < len(subkey):
@@ -1267,31 +1277,51 @@ the way IP addresses are stored.
                 while key:
                     result = {key.pop(): result}
                 return result
-            for key, value in viewitems(values):
+
+            if isinstance(values, (basestring, utils.REGEXP_T)):
+                kv_generator = [(None, values)]
+            else:
+                kv_generator = viewitems(values)
+
+            for key, value in kv_generator:
                 subkey = _find_subkey(key)
                 if subkey is None:
-                    # XXX TEST THIS
-                    req = and_(
-                        req,
-                        cls.tables.script.data.contains(
-                            _to_json("%s.%s" % (basekey, key), value)
-                        ),
-                    )
+                    if isinstance(value, utils.REGEXP_T):
+                        base = cls.tables.script.data.op('->')(basekey)
+                        key = key.split('.')
+                        lastkey = key.pop()
+                        for subkey in key:
+                            base = base.op('->')(key)
+                        base = base.op('->>')(lastkey)
+                        req = and_(
+                            req,
+                            cls._searchstring_re(base, value, neg=False),
+                        )
+                    else:
+                        req = and_(
+                            req,
+                            cls.tables.script.data.contains(
+                                _to_json("%s.%s" % (basekey, key), value)
+                            ),
+                        )
                 elif subkey[1] is None:
-                    # XXX TEST THIS
                     req = and_(
                         req,
-                        column(
-                            subkey[0].replace(".", "_").replace('-', '_')
-                        ) == value,
+                        cls._searchstring_re(
+                            column(
+                                subkey[0].replace(".", "_").replace('-', '_')
+                            ).op('->>')(0),
+                            value,
+                            neg=False
+                        )
                     )
                 elif '.' in subkey[1]:
-                    # XXX TEST THIS
-                    firstpart, tail = subkey.split('.', 1)
+                    firstpart, tail = subkey[1].split('.', 1)
                     req = and_(
                         req,
                         column(subkey[0].replace(".", "_").replace('-', '_'))
-                        .op('->')(firstpart).contains(_to_json(tail))
+                        .op('->')(firstpart)
+                        .op('@>')(cast(_to_json(tail, value), JSONB))
                     )
                 else:
                     req = and_(
@@ -1318,15 +1348,6 @@ the way IP addresses are stored.
             return cls.searchscript(name="ssl-cert")
         return cls.searchscript(name="ssl-cert",
                                 values={'pubkey': {'type': keytype}})
-
-    @classmethod
-    def searchsshkey(cls, keytype=None):
-        if keytype is not None:
-            utils.LOGGER.warning(
-                "Cannot use keytype with PostgreSQL backend. "
-                "Filter will return more results than expected"
-            )
-        return cls.searchscript(name="ssh-hostkey")
 
     @classmethod
     def searchsvchostname(cls, hostname):
@@ -1528,8 +1549,7 @@ class SQLDBNmap(SQLDBActive, DBNmap):
     base_filter = NmapFilter
 
     def __init__(self, url):
-        DBNmap.__init__(self)
-        SQLDBActive.__init__(self, url)
+        super(SQLDBNmap, self).__init__(url)
         self.content_handler = xmlnmap.Nmap2DB
 
     def store_or_merge_host(self, host):
@@ -1616,8 +1636,7 @@ class SQLDBView(SQLDBActive, DBView):
     base_filter = ViewFilter
 
     def __init__(self, url):
-        DBView.__init__(self)
-        SQLDBActive.__init__(self, url)
+        super(SQLDBView, self).__init__(url)
 
     def store_or_merge_host(self, host):
         # FIXME: may cause performance issues
@@ -1729,8 +1748,7 @@ class SQLDBPassive(SQLDB, DBPassive):
     base_filter = PassiveFilter
 
     def __init__(self, url):
-        SQLDB.__init__(self, url)
-        DBPassive.__init__(self)
+        super(SQLDBPassive, self).__init__(url)
 
     def count(self, flt):
         return self.db.execute(
@@ -1739,10 +1757,13 @@ class SQLDBPassive(SQLDB, DBPassive):
             )
         ).fetchone()[0]
 
-    def remove(self, flt):
-        base = flt.query(
-            select([self.tables.passive.id]).select_from(flt.select_from)
-        ).cte("base")
+    def remove(self, spec_or_id):
+        if not isinstance(spec_or_id, Filter):
+            spec_or_id = self.searchobjectid(spec_or_id)
+        base = spec_or_id.query(
+            select([self.tables.passive.id]).select_from(
+                spec_or_id.select_from
+            )).cte("base")
         self.db.execute(
             delete(self.tables.passive).where(self.tables.passive.id.in_(base))
         )
@@ -1754,6 +1775,7 @@ returns a generator.
         """
         req = flt.query(
             select([
+                self.tables.passive.id.label("_id"),
                 self.tables.passive.addr, self.tables.passive.sensor,
                 self.tables.passive.count, self.tables.passive.firstseen,
                 self.tables.passive.lastseen, self.tables.passive.port,
@@ -1905,15 +1927,16 @@ passive table."""
     def searchnonexistent(cls):
         return PassiveFilter(main=False)
 
-    def _searchobjectid(self, oid, neg=False):
+    @classmethod
+    def _searchobjectid(cls, oid, neg=False):
         if len(oid) == 1:
             return PassiveFilter(
-                main=(self.tables.passive.id != oid[0]) if neg else
-                (self.tables.passive.id == oid[0])
+                main=(cls.tables.passive.id != oid[0]) if neg else
+                (cls.tables.passive.id == oid[0])
             )
         return PassiveFilter(
-            main=(self.tables.passive.id.notin_(oid[0])) if neg else
-            (self.tables.passive.id.in_(oid[0]))
+            main=(cls.tables.passive.id.notin_(oid[0])) if neg else
+            (cls.tables.passive.id.in_(oid[0]))
         )
 
     @classmethod
@@ -1975,6 +1998,18 @@ passive table."""
 
     @classmethod
     def searchdns(cls, name, reverse=False, subdomains=False):
+        if isinstance(name, list):
+            if len(name) == 1:
+                name = name[0]
+            else:
+                return cls._flt_or(*(cls._searchdns(domain,
+                                                    reverse,
+                                                    subdomains)
+                                     for domain in name))
+        return cls._searchdns(name, reverse, subdomains)
+
+    @classmethod
+    def _searchdns(cls, name, reverse=False, subdomains=False):
         return PassiveFilter(main=(
             (cls.tables.passive.recontype == 'DNS_ANSWER') &
             (
@@ -1990,7 +2025,15 @@ passive table."""
         ))
 
     @classmethod
-    def searchuseragent(cls, useragent):
+    def searchuseragent(cls, useragent=None, neg=False):
+        if neg:
+            raise ValueError("searchuseragent([...], neg=True) is not "
+                             "supported in passive DB.")
+        if useragent is None:
+            return PassiveFilter(main=(
+                (cls.tables.passive.recontype == 'HTTP_CLIENT_HEADER') &
+                (cls.tables.passive.source == 'USER-AGENT')
+            ))
         return PassiveFilter(main=(
             (cls.tables.passive.recontype == 'HTTP_CLIENT_HEADER') &
             (cls.tables.passive.source == 'USER-AGENT') &
@@ -2121,12 +2164,20 @@ passive table."""
         ))
 
     @classmethod
-    def searchcertsubject(cls, expr):
-        return PassiveFilter(main=(
+    def searchcertsubject(cls, expr, issuer=None):
+        base = (
             (cls.tables.passive.recontype == 'SSL_SERVER') &
             (cls.tables.passive.source == 'cert') &
             (cls._searchstring_re(
                 cls.tables.passive.moreinfo.op('->>')('subject_text'), expr
+            ))
+        )
+        if issuer is None:
+            return PassiveFilter(main=base)
+        return PassiveFilter(main=(
+            base &
+            (cls._searchstring_re(
+                cls.tables.passive.moreinfo.op('->>')('issuer_text'), issuer
             ))
         ))
 

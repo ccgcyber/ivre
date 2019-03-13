@@ -41,7 +41,7 @@ from ivre.db.sql import PassiveCSVFile, ScanCSVFile, SQLDB, SQLDBActive, \
 class PostgresDB(SQLDB):
 
     def __init__(self, url):
-        SQLDB.__init__(self, url)
+        super(PostgresDB, self).__init__(url)
 
     @staticmethod
     def ip2internal(addr):
@@ -139,15 +139,13 @@ class BulkInsert(object):
 class PostgresDBFlow(PostgresDB, SQLDBFlow):
 
     def __init__(self, url):
-        PostgresDB.__init__(self, url)
-        SQLDBFlow.__init__(self, url)
+        super(PostgresDBFlow, self).__init__(url)
 
 
 class PostgresDBActive(PostgresDB, SQLDBActive):
 
     def __init__(self, url):
-        PostgresDB.__init__(self, url)
-        SQLDBActive.__init__(self, url)
+        super(PostgresDBActive, self).__init__(url)
 
     def __migrate_schema_10_11(self):
         """Converts a record from version 10 to version 11.
@@ -597,6 +595,132 @@ insert structures.
                 and_(self.tables.script.name == 'ssl-cert',
                      self.tables.script.data['ssl-cert'].has_key(subfield))
             )  # noqa: W601 (BinaryExpression)
+        elif field == 'useragent' or field.startswith('useragent:'):
+            if field == 'useragent':
+                flt = self.flt_and(flt, self.searchuseragent())
+                field = self._topstructure(
+                    self.tables.script,
+                    [column('http_user_agent')],
+                    self.tables.script.name == 'http-user-agent',
+                    None,
+                    func.jsonb_array_elements(
+                        self.tables.script.data['http-user-agent'],
+                    ).alias('http_user_agent')
+                )  # noqa: W601 (BinaryExpression)
+            else:
+                subfield = utils.str2regexp(field[10:])
+                flt = self.flt_and(flt,
+                                   self.searchuseragent(useragent=subfield))
+                field = self._topstructure(
+                    self.tables.script,
+                    [column('http_user_agent')],
+                    and_(self.tables.script.name == 'http-user-agent',
+                         self._searchstring_re(
+                             column('http_user_agent').op('->>')(0),
+                             subfield,
+                         )),
+                    None,
+                    func.jsonb_array_elements(
+                        self.tables.script.data['http-user-agent'],
+                    ).alias('http_user_agent')
+                )  # noqa: W601 (BinaryExpression)
+        elif field == 'ja3-client' or (
+                field.startswith('ja3-client') and field[10] in ':.'
+        ):
+            if ':' in field:
+                field, value = field.split(':', 1)
+                subkey, value = self.ja3keyvalue(utils.str2regexp(value))
+            else:
+                value = None
+            if '.' in field:
+                field, subfield = field.split('.', 1)
+            else:
+                subfield = 'md5'
+            flt = self.flt_and(flt, self.searchja3client(value_or_hash=value))
+            if value is None:
+                field = self._topstructure(
+                    self.tables.script,
+                    [column('ssl_ja3_client').op('->>')(subfield)],
+                    self.tables.script.name == 'ssl-ja3-client',
+                    None,
+                    func.jsonb_array_elements(
+                        self.tables.script.data['ssl-ja3-client'],
+                    ).alias('ssl_ja3_client')
+                )  # noqa: W601 (BinaryExpression)
+            else:
+                field = self._topstructure(
+                    self.tables.script,
+                    [column('ssl_ja3_client').op('->>')(subfield)],
+                    and_(self.tables.script.name == 'ssl-ja3-client',
+                         self._searchstring_re(
+                             column('ssl_ja3_client').op('->>')(subkey),
+                             value,
+                         )),
+                    None,
+                    func.jsonb_array_elements(
+                        self.tables.script.data['ssl-ja3-client'],
+                    ).alias('ssl_ja3_client')
+                )  # noqa: W601 (BinaryExpression)
+        elif field == 'ja3-server' or (
+                field.startswith('ja3-server') and field[10] in ':.'
+        ):
+            if ':' in field:
+                field, values = field.split(':', 1)
+                if ':' in values:
+                    value1, value2 = values.split(':', 1)
+                    if value1:
+                        subkey1, value1 = self.ja3keyvalue(
+                            utils.str2regexp(value1)
+                        )
+                    else:
+                        subkey1, value1 = None, None
+                    if value2:
+                        subkey2, value2 = self.ja3keyvalue(
+                            utils.str2regexp(value2)
+                        )
+                    else:
+                        subkey2, value2 = None, None
+                else:
+                    subkey1, value1 = self.ja3keyvalue(
+                        utils.str2regexp(values)
+                    )
+                    subkey2, value2 = None, None
+            else:
+                subkey1, value1 = None, None
+                subkey2, value2 = None, None
+            if '.' in field:
+                field, subfield = field.split('.', 1)
+            else:
+                subfield = 'md5'
+            condition = self.tables.script.name == 'ssl-ja3-server'
+            if value1 is not None:
+                condition = and_(
+                    condition,
+                    self._searchstring_re(
+                        column('ssl_ja3_server').op('->>')(subkey1),
+                        value1,
+                    )
+                )
+            if value2 is not None:
+                condition = and_(
+                    condition,
+                    self._searchstring_re(
+                        column('ssl_ja3_server').op('->')('client')
+                        .op('->>')(subkey2),
+                        value2,
+                    )
+                )
+            field = self._topstructure(
+                self.tables.script,
+                [column('ssl_ja3_server').op('->>')(subfield),
+                 column('ssl_ja3_server').op('->')('client')
+                 .op('->>')(subfield)],
+                condition,
+                None,
+                func.jsonb_array_elements(
+                    self.tables.script.data['ssl-ja3-server'],
+                ).alias('ssl_ja3_server')
+            )  # noqa: W601 (BinaryExpression)
         elif field == "source":
             field = self._topstructure(self.tables.scan,
                                        [self.tables.scan.source])
@@ -771,8 +895,7 @@ insert structures.
 class PostgresDBNmap(PostgresDBActive, SQLDBNmap):
 
     def __init__(self, url):
-        PostgresDBActive.__init__(self, url)
-        SQLDBNmap.__init__(self, url)
+        super(PostgresDBNmap, self).__init__(url)
 
     def store_scan_doc(self, scan):
         scan = scan.copy()
@@ -918,8 +1041,7 @@ class PostgresDBNmap(PostgresDBActive, SQLDBNmap):
 class PostgresDBView(PostgresDBActive, SQLDBView):
 
     def __init__(self, url):
-        PostgresDBActive.__init__(self, url)
-        SQLDBView.__init__(self, url)
+        super(PostgresDBView, self).__init__(url)
 
     def _store_host(self, host):
         addr = self.ip2internal(host['addr'])
@@ -1067,8 +1189,7 @@ class PostgresDBView(PostgresDBActive, SQLDBView):
 class PostgresDBPassive(PostgresDB, SQLDBPassive):
 
     def __init__(self, url):
-        PostgresDB.__init__(self, url)
-        SQLDBPassive.__init__(self, url)
+        super(PostgresDBPassive, self).__init__(url)
         Index(
             'ix_passive_record', self.tables.passive.addr,
             self.tables.passive.sensor, self.tables.passive.recontype,

@@ -312,7 +312,7 @@ def str2regexp(string):
 
     """
     if string.startswith('/'):
-        string = string.split('/', 2)[1:]
+        string = string[1:].rsplit('/', 1)
         if len(string) == 1:
             string.append('')
         string = re.compile(
@@ -1395,8 +1395,8 @@ None if it is a "normal", usable address.
     try:
         addr = ip2int(addr)
     except (TypeError, socket.error):
-            # FIXME no IPv6 support
-            return None
+        # FIXME no IPv6 support
+        return None
     return _ADDR_TYPES[bisect_left(_ADDR_TYPES_LAST_IP, addr)]
 
 

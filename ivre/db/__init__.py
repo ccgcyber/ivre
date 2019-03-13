@@ -91,6 +91,8 @@ class DB(object):
         self.argparser.add_argument('--port', metavar='PORT')
         self.argparser.add_argument('--service', metavar='SVC')
         self.argparser.add_argument('--svchostname', metavar='HOSTNAME')
+        self.argparser.add_argument('--useragent', metavar='USER-AGENT',
+                                    nargs='?', const=False)
 
     def parse_args(self, args, flt=None):
         if flt is None:
@@ -129,6 +131,16 @@ class DB(object):
                 flt,
                 self.searchsvchostname(utils.str2regexp(args.svchostname))
             )
+        if args.useragent is not None:
+            if args.useragent is False:
+                flt = self.flt_and(flt, self.searchuseragent())
+            else:
+                flt = self.flt_and(
+                    flt,
+                    self.searchuseragent(
+                        useragent=utils.str2regexp(args.useragent)
+                    ),
+                )
         return flt
 
     @staticmethod
@@ -263,10 +275,12 @@ class DB(object):
 
     def searchjavaua(self):
         """Finds Java User-Agent."""
-        return self.searchuseragent(re.compile('(^| )(Java|javaws)/', flags=0))
+        return self.searchuseragent(
+            useragent=re.compile('(^| )(Java|javaws)/', flags=0),
+        )
 
     @staticmethod
-    def searchuseragent(useragent):
+    def searchuseragent(useragent=None, neg=False):
         """Finds specified User-Agent(s)."""
         raise NotImplementedError
 
@@ -764,7 +778,7 @@ they are stored as canonical string representations.
         if key is not None:
             params.setdefault("values", {})['key'] = key
         if keytype is not None:
-            params.setdefault("values", {})['type'] = keytype
+            params.setdefault("values", {})['type'] = 'ssh-%s' % keytype
         if bits is not None:
             params.setdefault("values", {})['bits'] = bits
         if output is not None:
@@ -847,12 +861,13 @@ they are stored as canonical string representations.
                                  output=re.compile('nfs', flags=0))
 
     def searchtorcert(self):
+        expr = re.compile(
+            '^commonName=www\\.[a-z2-7]{8,20}\\.(net|com)$',
+            flags=0
+        )
         return self.searchscript(
             name='ssl-cert',
-            output=re.compile(
-                '^Subject: CN=www\\.[a-z2-7]{8,20}\\.(net|com)($|\n)',
-                flags=0,
-            ),
+            values={'subject_text': expr, 'issuer_text': expr},
         )
 
     @classmethod
@@ -912,6 +927,16 @@ they are stored as canonical string representations.
         if 'forest' in args:
             args['forest_dns'] = args.pop('forest')
         return cls.searchscript(name='smb-os-discovery', values=args)
+
+    @classmethod
+    def searchuseragent(cls, useragent=None, neg=False):
+        if useragent is None:
+            return cls.searchscript(name="http-user-agent", neg=neg)
+        return cls.searchscript(
+            name="http-user-agent",
+            values=useragent,
+            neg=neg
+        )
 
     def parse_args(self, args, flt=None):
         flt = super(DBActive, self).parse_args(args, flt=flt)
@@ -1199,6 +1224,106 @@ class DBView(DBActive):
 
     def __init__(self):
         super(DBView, self).__init__()
+        self.argparser.add_argument('--ssl-ja3-server',
+                                    metavar='JA3-SERVER[:JA3-CLIENT]',
+                                    nargs='?',
+                                    const=False,
+                                    default=None)
+        self.argparser.add_argument('--ssl-ja3-client',
+                                    metavar='JA3-CLIENT',
+                                    nargs='?',
+                                    const=False,
+                                    default=None)
+
+    def parse_args(self, args, flt=None):
+        flt = super(DBView, self).parse_args(args, flt=flt)
+        if args.ssl_ja3_client is not None:
+            cli = args.ssl_ja3_client
+            flt = self.flt_and(flt, self.searchja3client(
+                value_or_hash=(
+                    False if cli is False else utils.str2regexp(cli)
+                )
+            ))
+        if args.ssl_ja3_server is not None:
+            if args.ssl_ja3_server is False:
+                # There are no additional arguments
+                flt = self.flt_and(flt, self.searchja3server())
+            else:
+                split = [utils.str2regexp(v) if v else None
+                         for v in args.ssl_ja3_server.split(':', 1)]
+                if len(split) == 1:
+                    # Only a JA3 server is given
+                    flt = self.flt_and(flt, self.searchja3server(
+                        value_or_hash=split[0]
+                    ))
+                else:
+                    # Both client and server JA3 are given
+                    flt = self.flt_and(flt, self.searchja3server(
+                        value_or_hash=split[0],
+                        client_value_or_hash=split[1],
+                    ))
+        return flt
+
+    @staticmethod
+    def merge_ja3_scripts(curscript, script, script_id):
+
+        def is_server(script_id):
+            return script_id == 'ssl-ja3-server'
+
+        def ja3_equals(a, b, script_id):
+            return (a['raw'] == b['raw'] and
+                    (not is_server(script_id) or
+                     a['client']['raw'] == b['client']['raw']))
+
+        def ja3_output(ja3, script_id):
+            output = ja3['md5']
+            if is_server(script_id):
+                output += ' - ' + ja3['client']['md5']
+            return output
+        return DBView._merge_scripts(curscript, script, script_id,
+                                     ja3_equals, ja3_output)
+
+    @staticmethod
+    def merge_ua_scripts(curscript, script, script_id):
+
+        def ua_equals(a, b, script_id):
+            return a == b
+
+        def ua_output(ua, script_id):
+            return ua
+
+        return DBView._merge_scripts(curscript, script, script_id,
+                                     ua_equals, ua_output)
+
+    @staticmethod
+    def _merge_scripts(curscript, script, script_id,
+                       script_equals, script_output):
+        """Merge two scripts and return the result. Avoid duplicates.
+        """
+        to_merge_list = []
+        for to_add in script[script_id]:
+            to_merge = True
+            for cur in curscript[script_id]:
+                if script_equals(to_add, cur, script_id):
+                    to_merge = False
+                    break
+            if to_merge:
+                to_merge_list.append(to_add)
+        curscript[script_id].extend(to_merge_list)
+        # Compute output from curscript[script_id]
+        output = ""
+        for el in curscript[script_id]:
+            output += script_output(el, script_id) + '\n'
+        curscript['output'] = output
+        return curscript
+
+    @staticmethod
+    def merge_scripts(curscript, script, script_id):
+        if script_id.startswith('ssl-ja3-'):
+            return DBView.merge_ja3_scripts(curscript, script, script_id)
+        elif script_id == 'http-user-agent':
+            return DBView.merge_ua_scripts(curscript, script, script_id)
+        return {}
 
     @staticmethod
     def merge_host_docs(rec1, rec2):
@@ -1262,6 +1387,13 @@ class DBView(DBActive):
                 for script in port.get("scripts", []):
                     if script['id'] not in present_scripts:
                         curport['scripts'].append(script)
+                    elif (script['id'] in ['ssl-ja3-server',
+                                           'ssl-ja3-client',
+                                           'http-user-agent']):
+                        # Merge scripts
+                        curscript = next(x for x in curport['scripts']
+                                         if x['id'] == script['id'])
+                        DBView.merge_scripts(curscript, script, script['id'])
                 if not curport['scripts']:
                     del curport['scripts']
                 if 'service_name' in port and 'service_name' not in curport:
@@ -1317,6 +1449,52 @@ class DBView(DBActive):
         self.remove(rec)
         return True
 
+    @staticmethod
+    def ja3keyvalue(value_or_hash):
+        """Returns the key and the value to search for according
+        to the nature of the given argument for ja3 filtering"""
+        if isinstance(value_or_hash, utils.REGEXP_T):
+            return ('raw', value_or_hash)
+        if utils.HEX.search(value_or_hash):
+            key = {32: 'md5', 40: 'sha1',
+                   64: 'sha256'}.get(len(value_or_hash), 'raw')
+        else:
+            key = 'raw'
+        if key == 'raw':
+            key = 'md5'
+            value_or_hash = (utils.hashlib.new('md5',
+                                               value_or_hash.encode())
+                             .hexdigest())
+        return (key, value_or_hash)
+
+    @classmethod
+    def _searchja3(cls, value_or_hash, script_id, neg):
+        if not value_or_hash:
+            return cls.searchscript(name=script_id, neg=neg)
+        key, value = cls.ja3keyvalue(value_or_hash)
+        return cls.searchscript(name=script_id, values={key: value}, neg=neg)
+
+    @classmethod
+    def searchja3client(cls, value_or_hash=None, neg=False):
+        return cls._searchja3(value_or_hash, 'ssl-ja3-client', neg=neg)
+
+    @classmethod
+    def searchja3server(cls, value_or_hash=None, client_value_or_hash=None,
+                        neg=False):
+        script_id = 'ssl-ja3-server'
+        if not client_value_or_hash:
+            return cls._searchja3(value_or_hash, script_id, neg=neg)
+        key_client, value_client = cls.ja3keyvalue(client_value_or_hash)
+        values = {'client.%s' % (key_client): value_client}
+        if value_or_hash:
+            key_srv, value_srv = cls.ja3keyvalue(value_or_hash)
+            values[key_srv] = value_srv
+        return cls.searchscript(
+            name=script_id,
+            values=values,
+            neg=neg,
+        )
+
 
 class _RecInfo(object):
     __slots__ = ["count", "firstseen", "infos", "lastseen"]
@@ -1357,7 +1535,6 @@ class DBPassive(DB):
         self.argparser.add_argument('--basicauth', action='store_true')
         self.argparser.add_argument('--auth', action='store_true')
         self.argparser.add_argument('--java', action='store_true')
-        self.argparser.add_argument('--ua')
         self.argparser.add_argument('--ftp', action='store_true')
         self.argparser.add_argument('--pop', action='store_true')
         self.argparser.add_argument('--timeago', type=int)
@@ -1376,11 +1553,6 @@ class DBPassive(DB):
             flt = self.flt_and(flt, self.searchbasicauth())
         if args.auth:
             flt = self.flt_and(flt, self.searchhttpauth())
-        if args.ua is not None:
-            flt = self.flt_and(
-                flt,
-                self.searchuseragent(utils.str2regexp(args.ua))
-            )
         if args.java:
             flt = self.flt_and(
                 flt,
@@ -1491,12 +1663,59 @@ class DBPassive(DB):
 
     def searchtorcert(self):
         return self.searchcertsubject(
-            re.compile('^CN=www\\.[a-z2-7]{8,20}\\.(net|com)$',
-                       flags=0))
+            re.compile('^commonName=www\\.[a-z2-7]{8,20}\\.(net|com)$',
+                       flags=0),
+            issuer=re.compile('^commonName=www\\.[a-z2-7]{8,20}\\.(net|com)$',
+                              flags=0),
+        )
 
     @staticmethod
-    def searchcertsubject(expr):
+    def searchcertsubject(expr, issuer=None):
         raise NotImplementedError
+
+    @staticmethod
+    def searchdns(name, reverse=False, subdomains=False):
+        """Filters DNS records for domain `name`.
+        `name` can be a string, a list or a regular expression.
+        If `reverse` is set to True, filters reverse records.
+        If `subdomains` is set to True, the filter will match any subdomains.
+        """
+        raise NotImplementedError
+
+    def get(self, spec, **kargs):
+        """Queries the active column with the provided filter "spec",
+and returns a generator."""
+        raise NotImplementedError
+
+    @staticmethod
+    def _update_dns_blacklist(old_spec):
+        """Create a new dns blacklist entry based on the value of
+the old dns entry"""
+        spec = {}
+        dnsbl_val = old_spec['value']
+        spec['recontype'] = 'DNS_BLACKLIST'
+        spec['value'] = old_spec['addr']
+        spec['source'] = "%s-%s" % (dnsbl_val.split('.', 4)[4],
+                                    old_spec['source'])
+        spec['addr'] = '.'.join(dnsbl_val.split('.')[3::-1])
+        spec['count'] = old_spec['count']
+        return spec
+
+    def update_dns_blacklist(self):
+        """Update the current database to detect blacklist domains.
+This function inserts a new element in the database, corresponding to the
+old element and delete the existing one."""
+
+        flt = self.searchdns(list(config.DNS_BLACKLIST_DOMAINS),
+                             subdomains=True)
+        base = self.get(flt)
+        for old_spec in base:
+            if any(old_spec['value'].endswith(dnsbl)
+                   for dnsbl in config.DNS_BLACKLIST_DOMAINS):
+                spec = self._update_dns_blacklist(old_spec)
+                self.insert_or_update(old_spec['firstseen'], spec,
+                                      lastseen=old_spec['lastseen'])
+                self.remove(old_spec['_id'])
 
 
 class DBData(DB):

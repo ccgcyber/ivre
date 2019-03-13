@@ -298,6 +298,18 @@ var HELP_FILTERS = {
 	    "title": "xp445",
 	    "content": "Look for Windows XP machines with TCP/445 port open.",
 	},
+	"ssl-ja3-client": {
+	    "title": "(!)ssl-ja3-client<b>[:JA3]</b>",
+	    "content": "Look for hosts with a JA3 or with the given JA3.",
+	},
+	"ssl-ja3-server": {
+	    "title": "(!)ssl-ja3-server<b>[:[JA3S][:JA3]]</b>",
+	    "content": "Look for hosts with a JA3S, with the given JA3S, with a JA3S corresponding to the given JA3 or with the given JA3S corresponding to the given JA3",
+	},
+	"useragent": {
+	    "title": "(!)useragent<b>[:[string or regexp]]</b>",
+	    "content": "Look for hosts using a User-Agent matching the argument."
+	},
 	/* OS fingerprint */
 	"os:": {
 	    "title": "os:<b>[string or regexp]</b>",
@@ -348,7 +360,7 @@ var HELP_FILTERS = {
 	},
 	"countports:": {
 	    "title": "<b>(!)</b>countports:<b>[count](-[count])</b>",
-	    "content": "Loor for results with open port number within the specified range.",
+	    "content": "Look for results with open port number within the specified range.",
 	},
 	"otheropenport:": {
 	    "title": "otheropenport:<b>[port number](,[port number](,...))</b>",
@@ -782,6 +794,30 @@ var HELP_TOPVALUES = {
 	    "title": "httphdr.value",
 	    "content": "Top HTTP header values seen, regardless of the header name",
 	},
+	"useragent:": {
+	    "title": "<b>(!)<b>useragent<b>[:[value]]</b>",
+	    "content": "Top HTTP User-Agent values seen."
+	},
+        "ja3-client:": {
+	    "title": "<b>(!)<b>ja3-client<b>[:[value]]</b>",
+	    "content": "Top JA3 client values (MD5)."
+        },
+        "ja3-client.md5:": {
+	    "title": "<b>(!)<b>ja3-client.md5<b>[:[value]]</b>",
+	    "content": "Top JA3 client values (MD5)."
+        },
+        "ja3-client.sha1:": {
+	    "title": "<b>(!)<b>ja3-client.sha1<b>[:[value]]</b>",
+	    "content": "Top JA3 client values (SHA1)."
+        },
+        "ja3-client.sha256:": {
+	    "title": "<b>(!)<b>ja3-client.sha256<b>[:[value]]</b>",
+	    "content": "Top JA3 client values (SHA256)."
+        },
+        "ja3-client.raw:": {
+	    "title": "<b>(!)<b>ja3-client.raw<b>[:[value]]</b>",
+	    "content": "Top JA3 client values (raw fingerprint)."
+        },
     }
 };
 

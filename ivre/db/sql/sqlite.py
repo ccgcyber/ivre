@@ -26,21 +26,20 @@ databases.
 from sqlalchemy import Index, and_, func, insert, update
 from sqlalchemy.exc import IntegrityError
 
-from ivre import utils
+from ivre import utils, config
 from ivre.db.sql import SQLDB, SQLDBPassive
 
 
 class SqliteDB(SQLDB):
 
     def __init__(self, url):
-        SQLDB.__init__(self, url)
+        super(SqliteDB, self).__init__(url)
 
 
 class SqliteDBPassive(SqliteDB, SQLDBPassive):
 
     def __init__(self, url):
-        SqliteDB.__init__(self, url)
-        SQLDBPassive.__init__(self, url)
+        super(SqliteDBPassive, self).__init__(url)
         Index(
             'ix_passive_record', self.tables.passive.addr,
             self.tables.passive.sensor, self.tables.passive.recontype,
@@ -90,3 +89,22 @@ class SqliteDBPassive(SqliteDB, SQLDBPassive):
                 self.tables.passive
             ).where(whereclause).values(upsert)
             self.db.execute(updt)
+
+    def update_dns_blacklist(self):
+        """A specific implementation is required for SQLite because
+it is not possible to read and write the database at the same time."""
+
+        flt = self.searchdns(list(config.DNS_BLACKLIST_DOMAINS),
+                             subdomains=True)
+        base = self.get(flt)
+        specs = []
+        for old_spec in base:
+            if any(old_spec['value'].endswith(dnsbl)
+                   for dnsbl in config.DNS_BLACKLIST_DOMAINS):
+                spec = self._update_dns_blacklist(old_spec)
+                specs.append([spec, old_spec['firstseen'],
+                              old_spec['lastseen'], old_spec['_id']])
+        for elmt in specs:
+            self.insert_or_update(elmt[1], elmt[0],
+                                  lastseen=elmt[2])
+            self.remove(elmt[3])

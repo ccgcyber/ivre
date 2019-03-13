@@ -43,8 +43,10 @@ import tempfile
 import time
 try:
     from urllib.request import HTTPError, Request, urlopen
+    from urllib.parse import quote
 except ImportError:
     from urllib2 import HTTPError, Request, urlopen
+    from urllib import quote
 
 
 from future.builtins import int as int_types, range
@@ -83,20 +85,21 @@ def capture(function, *args, **kwargs):
 
 
 def run_iter(cmd, interp=None, stdin=None, stdout=subprocess.PIPE,
-             stderr=subprocess.PIPE):
+             stderr=subprocess.PIPE, env=None):
     if interp is not None:
         cmd = interp + [which(cmd[0])] + cmd[1:]
-    return subprocess.Popen(cmd, stdin=stdin, stdout=stdout, stderr=stderr)
+    return subprocess.Popen(cmd, stdin=stdin, stdout=stdout, stderr=stderr,
+                            env=env)
 
 
-def run_cmd(cmd, interp=None, stdin=None):
-    proc = run_iter(cmd, interp=interp, stdin=stdin)
+def run_cmd(cmd, interp=None, stdin=None, env=None):
+    proc = run_iter(cmd, interp=interp, stdin=stdin, env=env)
     out, err = proc.communicate()
     return proc.returncode, out, err
 
 
-def python_run(cmd, stdin=None):
-    return run_cmd(cmd, interp=[sys.executable], stdin=stdin)
+def python_run(cmd, stdin=None, env=None):
+    return run_cmd(cmd, interp=[sys.executable], stdin=stdin, env=env)
 
 
 def python_run_iter(cmd, stdin=None, stdout=subprocess.PIPE,
@@ -105,9 +108,9 @@ def python_run_iter(cmd, stdin=None, stdout=subprocess.PIPE,
                     stderr=stderr)
 
 
-def coverage_run(cmd, stdin=None):
+def coverage_run(cmd, stdin=None, env=None):
     return run_cmd(cmd, interp=COVERAGE + ["run", "--parallel-mode"],
-                   stdin=stdin)
+                   stdin=stdin, env=env)
 
 
 def coverage_run_iter(cmd, stdin=None, stdout=subprocess.PIPE,
@@ -394,7 +397,7 @@ class IvreTests(unittest.TestCase):
 
     def _check_top_value_cgi(self, name, field, count=10, **kwargs):
         req = Request('http://%s:%d/cgi/scans/top/%s:%d' % (
-            HTTPD_HOSTNAME, HTTPD_PORT, field, count
+            HTTPD_HOSTNAME, HTTPD_PORT, quote(field), count
         ))
         req.add_header('Referer',
                        'http://%s:%d/' % (HTTPD_HOSTNAME, HTTPD_PORT))
@@ -456,7 +459,7 @@ class IvreTests(unittest.TestCase):
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         count = json.loads(udesc.read().decode())
         if name_or_value is None:
             pass
@@ -501,7 +504,7 @@ which `predicate()` is True, given `webflt`.
             req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                          HTTPD_PORT))
             udesc = urlopen(req)
-            self.assertEquals(udesc.getcode(), 200)
+            self.assertEqual(udesc.getcode(), 200)
             count = 0
             for record in json.loads(udesc.read().decode()):
                 if predicate(record):
@@ -691,9 +694,22 @@ which `predicate()` is True, given `webflt`.
         self.assertEqual(hosts_count, host_counter)
 
         # JSON
-        res, out, _ = RUN(['ivre', 'scancli', '--json'])
+        res, out, err = RUN(['ivre', 'scancli', '--json'])
         self.assertEqual(res, 0)
-        self.check_value("nmap_json_count", len(out.splitlines()))
+        self.assertTrue(not err)
+        self.assertEqual(len(out.splitlines()), hosts_count)
+        # SHORT
+        res, out, err = RUN(['ivre', 'scancli', '--short'])
+        self.assertEqual(res, 0)
+        self.assertTrue(not err)
+        self.assertEqual(len(out.splitlines()), hosts_count)
+        # GNMAP
+        res, out, err = RUN(['ivre', 'scancli', '--gnmap'])
+        self.assertEqual(res, 0)
+        self.assertTrue(not err)
+        count = sum(1 for line in out.splitlines() if b'Status: Up' in line)
+        self.assertEqual(count, hosts_count)
+
         # Object ID
         res, out, _ = RUN(["ivre", "scancli", "--json", "--limit", "1"])
         self.assertEqual(res, 0)
@@ -890,6 +906,40 @@ which `predicate()` is True, given `webflt`.
         # Test case OK?
         self.assertGreater(count, 0)
         self.check_value("nmap_anonftp_count", count)
+
+        # Check .searchsshkey()
+
+        def _find_fingerprint():
+            for host in ivre.db.db.nmap.get(ivre.db.db.nmap.searchsshkey()):
+                for port in host.get('ports', []):
+                    for script in port.get('scripts', []):
+                        if script['id'] == 'ssh-hostkey':
+                            for key in script.get('ssh-hostkey', []):
+                                if 'fingerprint' in key:
+                                    return host['addr'], key['fingerprint']
+
+        ip_addr, fingerprint = _find_fingerprint()
+        self.assertIsNotNone(fingerprint)
+
+        # Check .searchsshkey() with a fingerprint
+
+        def _has_fingerprint(host):
+            for port in host.get('ports', []):
+                for script in port.get('scripts', []):
+                    if script['id'] == 'ssh-hostkey':
+                        for key in script.get('ssh-hostkey', []):
+                            if key.get('fingerprint') == fingerprint:
+                                return True
+            return False
+
+        found_init_host = False
+        for host in ivre.db.db.nmap.get(ivre.db.db.nmap.searchsshkey(
+                fingerprint=fingerprint
+        )):
+            self.assertTrue(_has_fingerprint(host))
+            if host['addr'] == ip_addr:
+                found_init_host = True
+        self.assertTrue(found_init_host)
 
         count = ivre.db.db.nmap.count(
             ivre.db.db.nmap.searchhopdomain(re.compile('.'))
@@ -1107,7 +1157,7 @@ which `predicate()` is True, given `webflt`.
         self._check_top_value_cli("nmap_top_version_http", "version:http",
                                   command="scancli")
         self._check_top_value_cli("nmap_top_version_http_apache",
-                                  "version:http:Apache",
+                                  "version:http:Apache httpd",
                                   command="scancli")
         categories = ivre.db.db.nmap.topvalues("category")
         category = next(categories)
@@ -1224,6 +1274,7 @@ which `predicate()` is True, given `webflt`.
             "httphdr:content-type:/plain/i",
         )
 
+    def test_53_nmap_delete(self):
         # Remove
         addr = next(ivre.db.db.nmap.get(
             ivre.db.db.nmap.flt_empty,
@@ -1233,7 +1284,6 @@ which `predicate()` is True, given `webflt`.
             ivre.db.db.nmap.searchhost(addr)
         ):
             ivre.db.db.nmap.remove(result)
-            hosts_count -= 1
         count = ivre.db.db.nmap.count(
             ivre.db.db.nmap.searchhost(addr)
         )
@@ -1562,22 +1612,30 @@ which `predicate()` is True, given `webflt`.
                     field=field,
                     flt=ivre.db.db.passive.searchja3client(),
                     distinct=distinct,
-                    topnbr=2
                 )
                 values = next(cur)
                 while values.get('_id') is None:
                     values = next(cur)
+                maxnbr = values['count']
+                top_values = []
+                while values['count'] == maxnbr:
+                    top_values.append(values['_id'])
+                    try:
+                        values = next(cur)
+                    except StopIteration:
+                        break
                 self.check_value(
                     "passive_top_%s_%sdistinct" % (key,
                                                    "" if distinct else "not_"),
-                    values["_id"],
+                    top_values,
+                    check=self.assertItemsEqual,
                 )
                 self.check_value(
                     "passive_top_%s_%sdistinct_count" % (
                         key,
                         "" if distinct else "not_",
                     ),
-                    values["count"],
+                    maxnbr,
                 )
                 if not distinct:
                     # Let's try to find the record with same value and count
@@ -1752,17 +1810,6 @@ which `predicate()` is True, given `webflt`.
             self.assertTrue(not err)
             self.check_value("passive_count_country_%s" % cname, int(out))
 
-        # Delete
-        flt = ivre.db.db.passive.searchcert()
-        count = ivre.db.db.passive.count(flt)
-        # Test case OK?
-        self.assertGreater(count, 0)
-        ivre.db.db.passive.remove(flt)
-        new_count = ivre.db.db.passive.count(
-            ivre.db.db.passive.flt_empty
-        )
-        self.assertEqual(count + new_count, total_count)
-
         ret, out, _ = RUN(["ivre", "ipinfo", "--short"])
         self.assertEqual(ret, 0)
         count = sum(1 for _ in out.splitlines())
@@ -1830,6 +1877,61 @@ which `predicate()` is True, given `webflt`.
                 )
                 if 'source' in rec
             ))
+
+        # Test DNSBL
+
+        count = ivre.db.db.passive.count(
+            ivre.db.db.passive.searchrecontype('DNS_BLACKLIST')
+        )
+        self.check_value("passive_dnsbl_count_before_update", count)
+
+        list_dnsbl = sorted((i['addr'], i['count'], i['value'])
+                            for i in ivre.db.db.passive.get(
+                            ivre.db.db.passive.searchrecontype(
+                                'DNS_BLACKLIST')))
+        self.check_value("passive_dnsbl_results_before_update", list_dnsbl)
+
+        with tempfile.NamedTemporaryFile(delete=False) as fdesc:
+            newenv = os.environ.copy()
+            if "IVRE_CONF" in newenv:
+                fdesc.writelines(open(newenv['IVRE_CONF'], 'rb'))
+            fdesc.write(
+                '\nDNS_BLACKLIST_DOMAINS.add(\'dnsbl.ivre.rocks\')\n'.encode()
+            )
+            newenv["IVRE_CONF"] = fdesc.name
+
+        res, out, err = RUN(["ivre", "ipinfo", "--dnsbl-update"],
+                            env=newenv)
+        os.unlink(fdesc.name)
+
+        self.assertEqual(res, 0)
+        self.assertTrue(not out)
+
+        count = ivre.db.db.passive.count(
+            ivre.db.db.passive.searchrecontype('DNS_BLACKLIST')
+        )
+        self.check_value("passive_dnsbl_count_after_update", count)
+
+        list_dnsbl = sorted((i['addr'], i['count'], i['value'])
+                            for i in ivre.db.db.passive.get(
+                            ivre.db.db.passive.searchrecontype(
+                                'DNS_BLACKLIST')))
+        self.check_value("passive_dnsbl_results_after_update", list_dnsbl)
+
+    def test_54_passive_delete(self):
+        total_count = ivre.db.db.passive.count(
+            ivre.db.db.passive.flt_empty
+        )
+        # Delete
+        flt = ivre.db.db.passive.searchcert()
+        count = ivre.db.db.passive.count(flt)
+        # Test case OK?
+        self.assertGreater(count, 0)
+        ivre.db.db.passive.remove(flt)
+        new_count = ivre.db.db.passive.count(
+            ivre.db.db.passive.flt_empty
+        )
+        self.assertEqual(count + new_count, total_count)
 
     def test_60_flow(self):
 
@@ -2006,7 +2108,7 @@ which `predicate()` is True, given `webflt`.
             req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                          HTTPD_PORT))
             udesc = urlopen(req)
-            self.assertEquals(udesc.getcode(), 200)
+            self.assertEqual(udesc.getcode(), 200)
             result = ivre.db.db.data.infos_byip(addr)
             if result and 'coordinates' in result:
                 result['coordinates'] = list(result['coordinates'])
@@ -2451,20 +2553,20 @@ which `predicate()` is True, given `webflt`.
         req = Request('http://%s:%d/cgi/config' % (HTTPD_HOSTNAME, HTTPD_PORT))
         with self.assertRaises(HTTPError) as herror:
             udesc = urlopen(req)
-        self.assertEquals(herror.exception.getcode(), 400)
+        self.assertEqual(herror.exception.getcode(), 400)
         #   invalid value
         req = Request('http://%s:%d/cgi/config' % (HTTPD_HOSTNAME, HTTPD_PORT))
         req.add_header('Referer', 'http://invalid.invalid/invalid')
         with self.assertRaises(HTTPError) as herror:
             udesc = urlopen(req)
-        self.assertEquals(herror.exception.getcode(), 400)
+        self.assertEqual(herror.exception.getcode(), 400)
 
         # Get configuration
         req = Request('http://%s:%d/cgi/config' % (HTTPD_HOSTNAME, HTTPD_PORT))
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         config_values = {
             "notesbase": ivre.config.WEB_NOTES_BASE,
             "dflt_limit": ivre.config.WEB_LIMIT,
@@ -2479,15 +2581,15 @@ which `predicate()` is True, given `webflt`.
             key, value = line[:-2].decode().split(' = ')
             self.assertTrue(key.startswith('config.'))
             key = key[7:]
-            self.assertEquals(json.loads(value), config_values[key])
+            self.assertEqual(json.loads(value), config_values[key])
 
         # Test redirections & static files
         req = Request('http://%s:%d/' % (HTTPD_HOSTNAME, HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
-        self.assertEquals(udesc.url,
-                          'http://%s:%d/index.html' % (HTTPD_HOSTNAME,
-                                                       HTTPD_PORT))
+        self.assertEqual(udesc.getcode(), 200)
+        self.assertEqual(udesc.url,
+                         'http://%s:%d/index.html' % (HTTPD_HOSTNAME,
+                                                      HTTPD_PORT))
         result = False
         for line in udesc:
             if b'This file is part of IVRE.' in line:
@@ -2499,7 +2601,7 @@ which `predicate()` is True, given `webflt`.
         req = Request('http://%s:%d/dokuwiki/doc:readme' % (HTTPD_HOSTNAME,
                                                             HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         result = False
         for line in udesc:
             if b'is a network recon framework' in line:
@@ -2552,11 +2654,22 @@ which `predicate()` is True, given `webflt`.
         self.assertTrue(not err)
         self.assertEqual(len(out.splitlines()), view_count)
 
-        # --json
+        # JSON
         ret, out, err = RUN(["ivre", "view", "--json"])
         self.assertEqual(ret, 0)
         self.assertTrue(not err)
         self.assertEqual(len(out.splitlines()), view_count)
+        # SHORT
+        res, out, err = RUN(['ivre', 'view', '--short'])
+        self.assertEqual(res, 0)
+        self.assertTrue(not err)
+        self.assertEqual(len(out.splitlines()), view_count)
+        # GNMAP
+        ret, out, err = RUN(["ivre", "view", "--gnmap"])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        count = sum(1 for line in out.splitlines() if b'Status: Up' in line)
+        self.check_value("view_gnmap_up_count", count)
 
         # Filters
         self.check_view_top_value("view_ssh_top_port", "port:ssh")
@@ -2565,6 +2678,65 @@ which `predicate()` is True, given `webflt`.
         self.check_view_top_value("view_http_top_header", "httphdr.name")
         self.check_view_top_value("view_http_top_header_value",
                                   "httphdr.value")
+        self.check_view_top_value("view_http_top_ua", "useragent")
+        self.check_view_top_value("view_http_top_ua_curl", "useragent:/^curl/")
+
+        self.check_view_top_value("view_ssl_top_ja3cli_md5", "ja3-client")
+        self.check_view_top_value("view_ssl_top_ja3cli_md5", "ja3-client.md5")
+        self.check_view_top_value("view_ssl_top_ja3cli_sha1",
+                                  "ja3-client.sha1")
+        self.check_view_top_value("view_ssl_top_ja3cli_sha256",
+                                  "ja3-client.sha256")
+        self.check_view_top_value("view_ssl_top_ja3cli_raw", "ja3-client.raw")
+        self.check_view_top_value("view_ssl_top_ja3cli_md5_771",
+                                  "ja3-client:/^771/")
+        self.check_view_top_value("view_ssl_top_ja3cli_md5_771",
+                                  "ja3-client.md5:/^771/")
+        self.check_view_top_value("view_ssl_top_ja3cli_sha1_771",
+                                  "ja3-client.sha1:/^771/")
+        self.check_view_top_value("view_ssl_top_ja3cli_sha256_771",
+                                  "ja3-client.sha256:/^771/")
+        self.check_view_top_value("view_ssl_top_ja3cli_raw_771",
+                                  "ja3-client.raw:/^771/")
+
+        self.check_view_top_value("view_ssl_top_ja3srv_md5", "ja3-server")
+        self.check_view_top_value("view_ssl_top_ja3srv_md5", "ja3-server.md5")
+        self.check_view_top_value("view_ssl_top_ja3srv_sha1",
+                                  "ja3-server.sha1")
+        self.check_view_top_value("view_ssl_top_ja3srv_sha256",
+                                  "ja3-server.sha256")
+        self.check_view_top_value("view_ssl_top_ja3srv_raw", "ja3-server.raw")
+        self.check_view_top_value("view_ssl_top_ja3srv_md5_769",
+                                  "ja3-server:/^769/")
+        self.check_view_top_value("view_ssl_top_ja3srv_md5_769",
+                                  "ja3-server.md5:/^769/")
+        self.check_view_top_value("view_ssl_top_ja3srv_sha1_769",
+                                  "ja3-server.sha1:/^769/")
+        self.check_view_top_value("view_ssl_top_ja3srv_sha256_769",
+                                  "ja3-server.sha256:/^769/")
+        self.check_view_top_value("view_ssl_top_ja3srv_raw_769",
+                                  "ja3-server.raw:/^769/")
+        self.check_view_top_value("view_ssl_top_ja3srv_md5_771",
+                                  "ja3-server::/^771/")
+        self.check_view_top_value("view_ssl_top_ja3srv_md5_771",
+                                  "ja3-server.md5::/^771/")
+        self.check_view_top_value("view_ssl_top_ja3srv_sha1_771",
+                                  "ja3-server.sha1::/^771/")
+        self.check_view_top_value("view_ssl_top_ja3srv_sha256_771",
+                                  "ja3-server.sha256::/^771/")
+        self.check_view_top_value("view_ssl_top_ja3srv_raw_771",
+                                  "ja3-server.raw::/^771/")
+        self.check_view_top_value("view_ssl_top_ja3srv_md5_769_771",
+                                  "ja3-server:/^769/:/^771/")
+        self.check_view_top_value("view_ssl_top_ja3srv_md5_769_771",
+                                  "ja3-server.md5:/^769/:/^771/")
+        self.check_view_top_value("view_ssl_top_ja3srv_sha1_769_771",
+                                  "ja3-server.sha1:/^769/:/^771/")
+        self.check_view_top_value("view_ssl_top_ja3srv_sha256_769_771",
+                                  "ja3-server.sha256:/^769/:/^771/")
+        self.check_view_top_value("view_ssl_top_ja3srv_raw_769_771",
+                                  "ja3-server.raw:/^769/:/^771/")
+
         self.check_view_top_value("view_top_s7_module_name", "s7.module_name")
         self.check_view_top_value("view_top_s7_plant", "s7.plant")
         self.check_view_top_value("view_top_isotsap_product",
@@ -2585,7 +2757,7 @@ which `predicate()` is True, given `webflt`.
         self.check_view_top_value("view_top_version", "version")
         self.check_view_top_value("view_top_version_http", "version:http")
         self.check_view_top_value("view_top_version_http_apache",
-                                  "version:http:Apache")
+                                  "version:http:Apache httpd")
         categories = ivre.db.db.view.topvalues("category")
         category = next(categories)
         self.assertEqual(category["_id"], "TEST")
@@ -2616,6 +2788,14 @@ which `predicate()` is True, given `webflt`.
             "!script:ssl-cert",
         )
 
+        # Check torcert filter
+        count = self.check_view_count_value(
+            "view_torcert_count",
+            ivre.db.db.view.searchtorcert(),
+            ["--torcert"],
+            "torcert",
+        )
+
         # Check Web /scans
         addr = next(ivre.db.db.view.get(
             ivre.db.db.view.flt_empty, fields=['addr']
@@ -2636,7 +2816,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr in json.loads(udesc.read().decode()))
         # onlyips / IPs as numbers
         req = Request(
@@ -2647,7 +2827,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr_i in json.loads(udesc.read().decode()))
         # ipsports / IPs as strings
         req = Request('http://%s:%d/cgi/scans/ipsports?q=net:%s' % (
@@ -2656,7 +2836,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr in
                         (x[0] for x in json.loads(udesc.read().decode())))
         # ipsports / IPs as numbers
@@ -2668,7 +2848,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr_i in
                         (x[0] for x in json.loads(udesc.read().decode())))
         # timeline / IPs as strings
@@ -2678,7 +2858,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr in
                         (x[1] for x in json.loads(udesc.read().decode())))
         # timeline / IPs as numbers
@@ -2690,7 +2870,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr_i in
                         (x[1] for x in json.loads(udesc.read().decode())))
         # timeline - modulo 24h / IPs as strings
@@ -2702,7 +2882,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr in
                         (x[1] for x in json.loads(udesc.read().decode())))
         # timeline - modulo 24h / IPs as numbers
@@ -2715,7 +2895,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr_i in
                         (x[1] for x in json.loads(udesc.read().decode())))
         # countopenports / IPs as strings
@@ -2725,7 +2905,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr in
                         (x[0] for x in json.loads(udesc.read().decode())))
         # countopenports / IPs as numbers
@@ -2737,7 +2917,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(addr_i in
                         (x[0] for x in json.loads(udesc.read().decode())))
         # coordinates
@@ -2753,7 +2933,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(
             coords[::-1] in
             (x['coordinates']
@@ -2775,7 +2955,7 @@ which `predicate()` is True, given `webflt`.
         req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
                                                      HTTPD_PORT))
         udesc = urlopen(req)
-        self.assertEquals(udesc.getcode(), 200)
+        self.assertEqual(udesc.getcode(), 200)
         self.assertTrue(all(
             43 < lat < 51 and -5 < lon < 8
             for lat, lon in (
@@ -2783,6 +2963,89 @@ which `predicate()` is True, given `webflt`.
                 for x in json.loads(udesc.read().decode())['geometries']
             )
         ))
+
+        # Check ja3 filters
+        self.check_view_count_value(
+            "view_count_ja3_server",
+            ivre.db.db.view.searchja3server(),
+            ["--ssl-ja3-server"],
+            "ssl-ja3-server",
+        )
+        self.check_view_count_value(
+            "view_count_ja3_client",
+            ivre.db.db.view.searchja3client(),
+            ["--ssl-ja3-client"],
+            "ssl-ja3-client",
+        )
+        ja3_raw = ("771,49195-49199-49162-49161-49171-49172-51-57-"
+                   "47-53-255,0-11-10-35-13-15,14-13-25-11-12-24-9-"
+                   "10-22-23-8-6-7-20-21-4-5-18-19-1-2-3-15-16-17,0-1-2")
+        self.check_view_count_value(
+            "view_count_ja3_client_raw",
+            ivre.db.db.view.searchja3client(
+                value_or_hash=ja3_raw,
+            ),
+            ["--ssl-ja3-client", ja3_raw],
+            "ssl-ja3-client:%s" % ja3_raw,
+        )
+        self.check_view_count_value(
+            "view_count_ja3_client_raw",
+            ivre.db.db.view.searchja3client(
+                value_or_hash=re.compile('^%s$' % ja3_raw),
+            ),
+            ["--ssl-ja3-client", '/^%s$/' % ja3_raw],
+            "ssl-ja3-client:/^%s$/" % ja3_raw,
+        )
+        ja3 = "fd2273056f386e0ba8004e897c337037"
+        self.check_view_count_value(
+            "view_count_ja3_client_fd22",
+            ivre.db.db.view.searchja3client(
+                value_or_hash=ja3
+            ),
+            ["--ssl-ja3-client", ja3],
+            "ssl-ja3-client:%s" % ja3,
+        )
+        ja3s = "a95ca7eab4d47d051a5cd4fb7b6005dc"
+        self.check_view_count_value(
+            "view_count_ja3_server_a95",
+            ivre.db.db.view.searchja3server(
+                value_or_hash=ja3s
+            ),
+            ["--ssl-ja3-server", ja3s],
+            "ssl-ja3-server:%s" % ja3s,
+        )
+        self.check_view_count_value(
+            "view_count_ja3_server_a95_fd22",
+            ivre.db.db.view.searchja3server(
+                value_or_hash=ja3s,
+                client_value_or_hash=ja3
+            ),
+            ["--ssl-ja3-server", "%s:%s" % (ja3s, ja3)],
+            "ssl-ja3-server:%s:%s" % (ja3s, ja3),
+        )
+        self.check_view_count_value(
+            "view_count_ja3_server_clt_fd22",
+            ivre.db.db.view.searchja3server(
+                client_value_or_hash=ja3
+            ),
+            ["--ssl-ja3-server", ":%s" % (ja3)],
+            "ssl-ja3-server::%s" % (ja3),
+        )
+        self.check_view_count_value(
+            "view_count_http_user_agent",
+            ivre.db.db.view.searchuseragent(),
+            ["--useragent"],
+            "useragent",
+        )
+        regexp = '/URL/7.3/i'
+        self.check_view_count_value(
+            "view_count_http_user_agent_URL_7_3",
+            ivre.db.db.view.searchuseragent(
+                useragent=ivre.utils.str2regexp(regexp)
+            ),
+            ["--useragent", regexp],
+            "useragent:%s" % regexp,
+        )
 
     def test_conf(self):
         # Ensure env var IVRE_CONF is taken into account
@@ -2808,19 +3071,21 @@ which `predicate()` is True, given `webflt`.
         RUN(["ivre", "runscansagentdb", "--init"], stdin=open(os.devnull))
 
 
-TESTS = set(["10_data", "30_nmap", "40_passive", "50_view", "60_flow",
-             "90_cleanup", "conf", "scans", "utils"])
+TESTS = set(["10_data", "30_nmap", "40_passive", "50_view", "53_nmap_delete",
+             "54_passive_delete", "60_flow", "90_cleanup", "conf", "scans",
+             "utils"])
 
 
 DATABASES = {
     # **excluded** tests
     "mongo": ["60_flow", "utils"],
     "postgres": ["60_flow", "scans", "utils"],
-    "sqlite": ["30_nmap", "50_view", "60_flow", "scans", "utils"],
-    "neo4j": ["30_nmap", "40_passive", "50_view", "90_cleanup", "scans",
-              "utils"],
-    "maxmind": ["30_nmap", "40_passive", "50_view", "60_flow", "90_cleanup",
-                "scans"],
+    "sqlite": ["30_nmap", "53_nmap_delete", "50_view", "60_flow", "scans",
+               "utils"],
+    "neo4j": ["30_nmap", "40_passive", "50_view", "53_nmap_delete",
+              "54_passive_delete", "90_cleanup", "scans", "utils"],
+    "maxmind": ["30_nmap", "40_passive", "50_view", "53_nmap_delete",
+                "54_passive_delete", "60_flow", "90_cleanup", "scans"],
 }
 
 

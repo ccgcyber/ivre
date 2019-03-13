@@ -659,26 +659,37 @@ want to do something special here, e.g., mix with other records.
 class MongoDBActive(MongoDB, DBActive):
 
     ipaddr_fields = ["addr", "traces.hops.ipaddr", "state_reason_ip"]
-    needunwind = ["categories", "ports", "ports.scripts",
-                  "ports.scripts.ssh-hostkey",
-                  "ports.scripts.smb-enum-shares.shares",
-                  "ports.scripts.ls.volumes",
-                  "ports.scripts.ls.volumes.files",
-                  "ports.scripts.mongodb-databases.databases",
-                  "ports.scripts.mongodb-databases.databases.shards",
-                  "ports.scripts.ike-info.transforms",
-                  "ports.scripts.ike-info.vendor_ids",
-                  "ports.scripts.vulns",
-                  "ports.scripts.vulns.check_results",
-                  "ports.scripts.vulns.description",
-                  "ports.scripts.vulns.extra_info",
-                  "ports.scripts.vulns.ids",
-                  "ports.scripts.vulns.refs",
-                  "ports.scripts.http-headers",
-                  "ports.screenwords",
-                  "traces", "traces.hops",
-                  "os.osmatch", "os.osclass", "hostnames",
-                  "hostnames.domains", "cpes"]
+    needunwind = [
+        "categories",
+        "cpes",
+        "os.osclass",
+        "os.osmatch",
+        "ports",
+        "ports.screenwords",
+        "ports.scripts",
+        "ports.scripts.http-headers",
+        "ports.scripts.http-user-agent",
+        "ports.scripts.ike-info.transforms",
+        "ports.scripts.ike-info.vendor_ids",
+        "ports.scripts.ls.volumes",
+        "ports.scripts.ls.volumes.files",
+        "ports.scripts.mongodb-databases.databases",
+        "ports.scripts.mongodb-databases.databases.shards",
+        "ports.scripts.smb-enum-shares.shares",
+        "ports.scripts.ssh-hostkey",
+        "ports.scripts.ssl-ja3-client",
+        "ports.scripts.ssl-ja3-server",
+        "ports.scripts.vulns",
+        "ports.scripts.vulns.check_results",
+        "ports.scripts.vulns.description",
+        "ports.scripts.vulns.extra_info",
+        "ports.scripts.vulns.ids",
+        "ports.scripts.vulns.refs",
+        "traces",
+        "traces.hops",
+        "hostnames",
+        "hostnames.domains",
+    ]
     column_hosts = 0
     indexes = [
         # hosts
@@ -1765,9 +1776,12 @@ it is not expected)."""
             if name is None:
                 raise TypeError(".searchscript() needs a `name` arg "
                                 "when using a `values` arg")
-            for field, value in viewitems(values):
-                req["%s.%s" % (xmlnmap.ALIASES_TABLE_ELEMS.get(name, name),
-                               field)] = value
+            if isinstance(values, (basestring, utils.REGEXP_T)):
+                req[xmlnmap.ALIASES_TABLE_ELEMS.get(name, name)] = values
+            else:
+                for field, value in viewitems(values):
+                    req["%s.%s" % (xmlnmap.ALIASES_TABLE_ELEMS.get(name, name),
+                                   field)] = value
         if not req:
             return {"ports.scripts": {"$exists": not neg}}
         if len(req) == 1:
@@ -1787,13 +1801,6 @@ it is not expected)."""
             return cls.searchscript(name="ssl-cert")
         return cls.searchscript(name="ssl-cert",
                                 values={'pubkey.type': keytype})
-
-    @classmethod
-    def searchsshkey(cls, keytype=None):
-        if keytype is None:
-            return cls.searchscript(name="ssh-hostkey")
-        return cls.searchscript(name="ssh-hostkey",
-                                values={'type': 'ssh-%s' % keytype})
 
     @staticmethod
     def searchsvchostname(hostname):
@@ -2691,6 +2698,113 @@ it is not expected)."""
         elif field.startswith('cert.'):
             subfield = field[5:]
             field = 'ports.scripts.ssl-cert.' + subfield
+        elif field == 'useragent' or field.startswith('useragent:'):
+            if field == 'useragent':
+                flt = self.flt_and(flt, self.searchuseragent())
+            else:
+                subfield = utils.str2regexp(field[10:])
+                flt = self.flt_and(flt,
+                                   self.searchuseragent(useragent=subfield))
+                specialflt = [
+                    {"$match": {'ports.scripts.http-user-agent': subfield}},
+                ]
+            field = "ports.scripts.http-user-agent"
+        elif field == 'ja3-client' or (
+                field.startswith('ja3-client') and field[10] in ':.'
+        ):
+            if ':' in field:
+                field, value = field.split(':', 1)
+                subkey, value = self.ja3keyvalue(utils.str2regexp(value))
+                specialflt = [
+                    {"$match": {
+                        'ports.scripts.ssl-ja3-client.%s' % subkey: value,
+                    }},
+                ]
+            else:
+                value = None
+                subkey = None
+            if '.' in field:
+                field, subfield = field.split('.', 1)
+            else:
+                subfield = 'md5'
+            if subkey is not None and subkey != subfield:
+                specialproj = {"_id": 0,
+                               "ports.scripts.ssl-ja3-client.%s" % subkey: 1,
+                               "ports.scripts.ssl-ja3-client.%s" % subfield: 1}
+            flt = self.flt_and(flt, self.searchja3client(value_or_hash=value))
+            field = "ports.scripts.ssl-ja3-client.%s" % subfield
+        elif field == 'ja3-server' or (
+                field.startswith('ja3-server') and field[10] in ':.'
+        ):
+            if ':' in field:
+                field, values = field.split(':', 1)
+                if ':' in values:
+                    value1, value2 = values.split(':', 1)
+                    if value1:
+                        subkey1, value1 = self.ja3keyvalue(
+                            utils.str2regexp(value1)
+                        )
+                    else:
+                        subkey1, value1 = None, None
+                    if value2:
+                        subkey2, value2 = self.ja3keyvalue(
+                            utils.str2regexp(value2)
+                        )
+                    else:
+                        subkey2, value2 = None, None
+                else:
+                    subkey1, value1 = self.ja3keyvalue(
+                        utils.str2regexp(values)
+                    )
+                    subkey2, value2 = None, None
+            else:
+                subkey1, value1 = None, None
+                subkey2, value2 = None, None
+            if '.' in field:
+                field, subfield = field.split('.', 1)
+            else:
+                subfield = 'md5'
+            flt = self.flt_and(flt, self.searchja3server(
+                value_or_hash=value1,
+                client_value_or_hash=value2,
+            ))
+            specialproj = {
+                "_id": 0,
+                "ports.scripts.ssl-ja3-server.%s" % subfield: 1,
+                "ports.scripts.ssl-ja3-server.client.%s" % subfield: 1,
+            }
+            if subkey1 is not None and subkey1 != subfield:
+                specialproj["ports.scripts.ssl-ja3-server.%s" % subkey1] = 1
+            if subkey2 is not None and subkey2 != subfield:
+                specialproj[
+                    "ports.scripts.ssl-ja3-server.client.%s" % subkey2
+                ] = 1
+            field = "ports.scripts.ssl-ja3-server"
+            if self.mongodb_32_more:
+                specialflt.append({"$project": {
+                    "_id": 0,
+                    field: [
+                        '$ports.scripts.ssl-ja3-server.%s' % subfield,
+                        '$ports.scripts.ssl-ja3-server.client.%s' % subfield,
+                    ],
+                }})
+
+                def outputproc(x):
+                    return {'count': x['count'],
+                            '_id': tuple(x['_id'])}
+            else:
+                specialflt.append({"$project": {
+                    "_id": 0,
+                    field: _old_array(
+                        '$ports.scripts.ssl-ja3-server.%s' % subfield,
+                        '$ports.scripts.ssl-ja3-server.client.%s' % subfield,
+                        convert_to_string=True,
+                    ),
+                }})
+
+                def outputproc(x):
+                    return {'count': x['count'],
+                            '_id': tuple(x['_id'].split('###', 1))}
         elif field == 'sshkey.bits':
             flt = self.flt_and(flt, self.searchsshkey())
             specialproj = {"ports.scripts.ssh-hostkey.type": 1,
@@ -3807,7 +3921,15 @@ setting values according to the keyword arguments.
         return {'infos.service_hostname': hostname}
 
     @staticmethod
-    def searchuseragent(useragent):
+    def searchuseragent(useragent=None, neg=False):
+        if neg:
+            raise ValueError("searchuseragent([...], neg=True) is not "
+                             "supported in passive DB.")
+        if useragent is None:
+            return {
+                'recontype': 'HTTP_CLIENT_HEADER',
+                'source': 'USER-AGENT',
+            }
         return {
             'recontype': 'HTTP_CLIENT_HEADER',
             'source': 'USER-AGENT',
@@ -3816,6 +3938,11 @@ setting values according to the keyword arguments.
 
     @staticmethod
     def searchdns(name, reverse=False, subdomains=False):
+        if isinstance(name, list):
+            if len(name) == 1:
+                name = name[0]
+            else:
+                name = {'$in': name}
         return {
             'recontype': 'DNS_ANSWER',
             (('infos.domaintarget' if reverse else 'infos.domain')
@@ -3885,10 +4012,14 @@ setting values according to the keyword arguments.
                 'infos.algo': 'ssh-' + keytype}
 
     @staticmethod
-    def searchcertsubject(expr):
-        return {'recontype': 'SSL_SERVER',
-                'source': 'cert',
-                'infos.subject_text': expr}
+    def searchcertsubject(expr, issuer=None):
+        res = {'recontype': 'SSL_SERVER',
+               'source': 'cert',
+               'infos.subject_text': expr}
+        if issuer is None:
+            return res
+        res["infos.issuer_text"] = issuer
+        return res
 
     @staticmethod
     def searchcertissuer(expr):
