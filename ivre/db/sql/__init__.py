@@ -26,7 +26,6 @@ import codecs
 from collections import namedtuple
 import csv
 import datetime
-import hashlib
 import json
 import re
 
@@ -34,8 +33,8 @@ import re
 from builtins import int, range
 from future.utils import PY3, viewitems, viewvalues
 from past.builtins import basestring
-from sqlalchemy import create_engine, desc, func, column, delete, \
-    exists, join, select, update, and_, not_, or_, cast
+from sqlalchemy import and_, cast, column, create_engine, delete, desc, func, \
+    exists, join, not_, nullsfirst, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 
 from ivre.db import DB, DBActive, DBFlow, DBNmap, DBPassive, DBView
@@ -166,21 +165,12 @@ class PassiveCSVFile(CSVFile):
     def fixline(self, line):
         if self.timestamps:
             timestamp, line = line
-            if isinstance(timestamp, datetime.datetime):
-                line["firstseen"] = line["lastseen"] = timestamp
-            else:
-                line["firstseen"] = line["lastseen"] = (
-                    datetime.datetime.fromtimestamp(timestamp)
-                )
+            line["firstseen"] = line["lastseen"] = utils.all2datetime(
+                timestamp
+            )
         else:
-            if not isinstance(line["firstseen"], datetime.datetime):
-                line["firstseen"] = datetime.datetime.fromtimestamp(
-                    line["firstseen"]
-                )
-            if not isinstance(line["lastseen"], datetime.datetime):
-                line["lastseen"] = datetime.datetime.fromtimestamp(
-                    line["lastseen"]
-                )
+            line["firstseen"] = utils.all2datetime(line["firstseen"])
+            line["lastseen"] = utils.all2datetime(line["lastseen"])
         if self.getinfos is not None:
             line.update(self.getinfos(line))
             try:
@@ -256,6 +246,15 @@ class SQLDB(DB):
     def init(self):
         self.drop()
         self.create()
+
+    def explain(self, req, **_):
+        """This method calls the SQL EXPLAIN statement to retrieve database
+        statistics.
+        """
+        raise NotImplementedError()
+
+    def _get(self, flt, limit=None, skip=None, sort=None, fields=None):
+        raise NotImplementedError()
 
     @staticmethod
     def ip2internal(addr):
@@ -880,8 +879,9 @@ the way IP addresses are stored.
         return tuple(action(flt, limit=limit, skip=skip)
                      for action in [self.get, self.count])
 
-    def get(self, flt, limit=None, skip=None, sort=None,
-            **kargs):
+    def _get(self, flt, limit=None, skip=None, sort=None, fields=None):
+        if fields is not None:
+            utils.LOGGER.warning("Argument 'fields' provided but unused")
         req = flt.query(select(
             [self.tables.scan.id, self.tables.scan.addr,
              self.tables.scan.source, self.tables.scan.info,
@@ -898,6 +898,10 @@ the way IP addresses are stored.
             req = req.offset(skip)
         if limit is not None:
             req = req.limit(limit)
+        return req
+
+    def get(self, flt, limit=None, skip=None, sort=None, fields=None):
+        req = self._get(flt, limit=limit, skip=skip, sort=sort, fields=fields)
         for scanrec in self.db.execute(req):
             rec = {}
             (rec["_id"], rec["addr"], rec["source"], rec["infos"],
@@ -1376,10 +1380,8 @@ the way IP addresses are stored.
         )
 
     def searchtimerange(self, start, stop, neg=False):
-        if not isinstance(start, datetime.datetime):
-            start = datetime.datetime.fromtimestamp(start)
-        if not isinstance(stop, datetime.datetime):
-            stop = datetime.datetime.fromtimestamp(stop)
+        start = utils.all2datetime(start)
+        stop = utils.all2datetime(stop)
         if neg:
             return self.base_filter(
                 main=(self.tables.scan.time_start < start) |
@@ -1768,11 +1770,9 @@ class SQLDBPassive(SQLDB, DBPassive):
             delete(self.tables.passive).where(self.tables.passive.id.in_(base))
         )
 
-    def get(self, flt, limit=None, skip=None, sort=None):
-        """Queries the passive database with the provided filter "flt", and
-returns a generator.
-
-        """
+    def _get(self, flt, limit=None, skip=None, sort=None, fields=None):
+        if fields is not None:
+            utils.LOGGER.warning("Argument 'fields' provided but unused.")
         req = flt.query(
             select([
                 self.tables.passive.id.label("_id"),
@@ -1790,6 +1790,14 @@ returns a generator.
             req = req.offset(skip)
         if limit is not None:
             req = req.limit(limit)
+        return req
+
+    def get(self, flt, limit=None, skip=None, sort=None, fields=None):
+        """Queries the passive database with the provided filter "flt", and
+returns a generator.
+
+        """
+        req = self._get(flt, limit=limit, skip=skip, sort=sort, fields=fields)
         for rec in self.db.execute(req):
             rec = dict((key, value) for key, value in viewitems(rec)
                        if value is not None)
@@ -1825,11 +1833,9 @@ returns the first result, or None if no result exists."""
             except KeyError:
                 pass
         addr = spec.pop("addr", None)
-        if not isinstance(timestamp, datetime.datetime):
-            timestamp = datetime.datetime.fromtimestamp(timestamp)
-        if lastseen is not None and not isinstance(lastseen,
-                                                   datetime.datetime):
-            lastseen = datetime.datetime.fromtimestamp(lastseen)
+        timestamp = utils.all2datetime(timestamp)
+        if lastseen is not None:
+            lastseen = utils.all2datetime(lastseen)
         if addr:
             addr = self.ip2internal(addr)
         otherfields = dict(
@@ -1922,6 +1928,45 @@ passive table."""
              "_id": outputproc(result[1:] if len(result) > 2 else result[1])}
             for result in self.db.execute(req.order_by(order).limit(topnbr))
         )
+
+    def _features_port_list(self, flt, yieldall, use_service,
+                            use_product, use_version):
+        # This is in SQLDBPassive because it **should** work with
+        # SQLite. However, because ACCESS_TXT does not work well with
+        # the result processor, it does not. This is a similar problem
+        # than .topvalues() with JSON fields.
+        flt = self.flt_and(flt, self.searchport(0, neg=True))
+        if use_version:
+            fields = [
+                self.tables.passive.port,
+                self.tables.passive.moreinfo.op('->>')('service_name'),
+                self.tables.passive.moreinfo.op('->>')('service_product'),
+                self.tables.passive.moreinfo.op('->>')('service_version'),
+            ]
+        elif use_product:
+            fields = [
+                self.tables.passive.port,
+                self.tables.passive.moreinfo.op('->>')('service_name'),
+                self.tables.passive.moreinfo.op('->>')('service_product'),
+            ]
+        elif use_service:
+            fields = [self.tables.passive.port,
+                      self.tables.passive.moreinfo.op('->>')('service_name')]
+        else:
+            fields = [self.tables.passive.port]
+        req = (
+            flt.query(
+                select(fields)
+                .group_by(*fields)
+            )
+        )
+        if not yieldall:
+            req = req.order_by(*(nullsfirst(fld) for fld in fields))
+            return self.db.execute(req)
+        else:
+            # results will be modified, we cannot keep a RowProxy
+            # instance, so we convert the results to lists
+            return (list(rec) for rec in self.db.execute(req))
 
     @classmethod
     def searchnonexistent(cls):
@@ -2092,24 +2137,18 @@ passive table."""
     def _searchja3(cls, value_or_hash=None):
         if value_or_hash is None:
             return True
-        if utils.HEX.search(value_or_hash):
-            try:
-                key = {
-                    32: cls.tables.passive.value,
-                    40: cls.tables.passive.moreinfo.op('->>')('sha1'),
-                    64: cls.tables.passive.moreinfo.op('->>')('sha256'),
-                }[len(value_or_hash)]
-            except KeyError:
-                pass
-            else:
-                return key == value_or_hash
-        return (
-            (cls.tables.passive.moreinfo.op('->>')('raw') == value_or_hash) &
-            (cls.tables.passive.value == hashlib.new(
-                'md5',
-                value_or_hash.encode(),
-            ).hexdigest())
-        )
+        key, value = cls._ja3keyvalue(value_or_hash)
+        try:
+            return {
+                'md5': cls.tables.passive.value,
+                'sha1': cls.tables.passive.moreinfo.op('->>')('sha1'),
+                'sha256': cls.tables.passive.moreinfo.op('->>')('sha256')
+            }[key] == value
+        except KeyError:
+            return cls._searchstring_re(
+                cls.tables.passive.moreinfo.op('->>')('raw'),
+                value,
+            )
 
     @classmethod
     def searchja3client(cls, value_or_hash=None):
@@ -2128,39 +2167,30 @@ passive table."""
         if client_value_or_hash is None:
             return PassiveFilter(main=(
                 base &
-                (cls.tables.passive.source.op('~')('^ja3-'))
+                cls.tables.passive.source.op('~')('^ja3-')
             ))
-        if utils.HEX.search(client_value_or_hash):
-            length = len(client_value_or_hash)
-            if length == 32:
-                return PassiveFilter(main=(
-                    base &
-                    (cls.tables.passive.source == (
-                        'ja3-%s' % client_value_or_hash
-                    ))
-                ))
-            if length == 40:
-                return PassiveFilter(main=(
-                    base &
-                    (cls.tables.passive.source.op('~')('^ja3-')) &
-                    (cls.tables.passive.moreinfo.op('->')('client')
-                     .op('->>')('sha1') == client_value_or_hash)
-                ))
-            if length == 64:
-                return PassiveFilter(main=(
-                    base &
-                    (cls.tables.passive.source.op('~')('^ja3-')) &
-                    (cls.tables.passive.moreinfo.op('->')('client')
-                     .op('->>')('sha256') == client_value_or_hash)
-                ))
+        key, value = cls._ja3keyvalue(client_value_or_hash)
+        if key == 'md5':
+            return PassiveFilter(main=(
+                base &
+                (cls.tables.passive.source == 'ja3-%s' % value)
+            ))
+        base &= cls.tables.passive.source.op('~')('^ja3-')
+        if key in ['sha1', 'sha256']:
+            return PassiveFilter(main=(
+                base &
+                (cls.tables.passive.moreinfo.op('->')("client").op('->>')(
+                    key
+                ) == value)
+            ))
         return PassiveFilter(main=(
             base &
-            (cls.tables.passive.source == ('ja3-%s' % hashlib.new(
-                'md5',
-                client_value_or_hash.encode(),
-            ).hexdigest())) &
-            (cls.tables.passive.moreinfo.op('->')('client')
-             .op('->>')('raw') == client_value_or_hash)
+            cls._searchstring_re(
+                cls.tables.passive.moreinfo.op('->')("client").op('->>')(
+                    'raw'
+                ),
+                value,
+            )
         ))
 
     @classmethod
@@ -2307,7 +2337,6 @@ passive table."""
     def searchnewer(cls, timestamp, neg=False, new=False):
         field = cls.tables.passive.lastseen if new else \
             cls.tables.passive.firstseen
-        if not isinstance(timestamp, datetime.datetime):
-            timestamp = datetime.datetime.fromtimestamp(timestamp)
+        timestamp = utils.all2datetime(timestamp)
         return PassiveFilter(main=(field <= timestamp if neg else
                                    field > timestamp))

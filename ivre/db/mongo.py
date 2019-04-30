@@ -33,6 +33,7 @@ import datetime
 import hashlib
 import json
 import os
+import random
 import re
 import socket
 import struct
@@ -79,7 +80,7 @@ MongoDB < 3.2.
     for elt in values:
         result.extend([sep, {'$toLower': elt} if convert_to_string else elt])
     if len(result) == 1:
-        return result
+        return result[0]
     return {'$concat': result}
 
 
@@ -523,6 +524,65 @@ want to do something special here, e.g., mix with other records.
                     for res in (res['_id'].split('###') for res in cursor))
         return (res['_id'] for res in cursor)
 
+    def _features_port_list(self, flt, yieldall, use_service, use_product,
+                            use_version):
+        pipeline, port, service_base = self._features_port_list_pipeline(
+            flt, use_service, use_product, use_version,
+        )
+        project = [port]
+        if use_service:
+            project.append('%s.service_name' % service_base)
+            if use_product:
+                project.append('%s.service_product' % service_base)
+                if use_version:
+                    project.append('%s.service_version' % service_base)
+        if self.mongodb_32_more:
+            project = {'field': project}
+        else:
+            project[0] = {"$toLower": project[0]}
+            none_value = "XXX_%s_XXX" % ''.join(random.choice(
+                'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+                '0123456789'
+            ) for _ in range(10))
+            for i, v in enumerate(project[1:]):
+                project[i + 1] = {"$ifNull": [v, none_value]}
+            project = {'field': _old_array(*project)}
+        pipeline.extend([
+            {'$project': project},
+            {'$group': {"_id": "$field"}},
+        ])
+        if self.mongodb_32_more:
+            if not yieldall:
+                # When not using yieldall, we can sort in
+                # database. Because port numbers are converted to
+                # strings in MongoDB < 3.2, we cannot rely on this
+                # sort however
+                pipeline.append(
+                    {'$sort': OrderedDict([("_id", 1)])}
+                )
+            for rec in self.db[
+                    self.columns[self._features_column]
+            ].aggregate(pipeline, cursor={}):
+                yield rec['_id']
+        else:
+            for rec in self.db[
+                    self.columns[self._features_column]
+            ].aggregate(pipeline, cursor={}):
+                data = rec['_id'].split('###')
+                # first value is a port number, converted to a string
+                # by _old_array()
+                data[0] = int(data[0])
+                # other values are strings, or None, which would be
+                # converted to the empty string by _old_array()
+                for i, v in enumerate(data[1:]):
+                    if v == none_value:
+                        data[i + 1] = None
+                yield data
+
+    def _features_port_list_pipeline(self, flt, use_service, use_product,
+                                     use_version):
+        raise NotImplementedError()
+
     # filters
     flt_empty = {}
 
@@ -691,6 +751,7 @@ class MongoDBActive(MongoDB, DBActive):
         "hostnames.domains",
     ]
     column_hosts = 0
+    _features_column = 0
     indexes = [
         # hosts
         [
@@ -2714,7 +2775,7 @@ it is not expected)."""
         ):
             if ':' in field:
                 field, value = field.split(':', 1)
-                subkey, value = self.ja3keyvalue(utils.str2regexp(value))
+                subkey, value = self._ja3keyvalue(utils.str2regexp(value))
                 specialflt = [
                     {"$match": {
                         'ports.scripts.ssl-ja3-client.%s' % subkey: value,
@@ -2741,19 +2802,19 @@ it is not expected)."""
                 if ':' in values:
                     value1, value2 = values.split(':', 1)
                     if value1:
-                        subkey1, value1 = self.ja3keyvalue(
+                        subkey1, value1 = self._ja3keyvalue(
                             utils.str2regexp(value1)
                         )
                     else:
                         subkey1, value1 = None, None
                     if value2:
-                        subkey2, value2 = self.ja3keyvalue(
+                        subkey2, value2 = self._ja3keyvalue(
                             utils.str2regexp(value2)
                         )
                     else:
                         subkey2, value2 = None, None
                 else:
-                    subkey1, value1 = self.ja3keyvalue(
+                    subkey1, value1 = self._ja3keyvalue(
                         utils.str2regexp(values)
                     )
                     subkey2, value2 = None, None
@@ -3171,6 +3232,82 @@ it is not expected)."""
         return self._distinct(self.columns[self.column_hosts], field, flt=flt,
                               sort=sort, limit=limit, skip=skip)
 
+    def _features_port_list_pipeline(self, flt, use_service, use_product,
+                                     use_version):
+        return (
+            [{"$match": self.flt_and(flt, {'ports.port': {'$exists': True}})},
+             {"$project": {'_id': 0, 'ports': 1}},
+             {"$unwind": "$ports"},
+             {"$match": {'ports.port': {'$ne': -1}}}],
+            '$ports.port',
+            '$ports'
+        )
+
+    def _features_port_get(self, features, flt, yieldall, use_service,
+                           use_product, use_version):
+        if use_version:
+            def _extract(rec):
+                for port in rec.get('ports', []):
+                    if port['port'] == -1:
+                        continue
+                    yield (port['port'], port.get('service_name'),
+                           port.get('service_product'),
+                           port.get('service_version'))
+                    if not yieldall:
+                        continue
+                    if port.get('service_version') is not None:
+                        yield (port['port'], port.get('service_name'),
+                               port.get('service_product'), None)
+                    else:
+                        continue
+                    if port.get('service_product') is not None:
+                        yield (port['port'], port.get('service_name'), None,
+                               None)
+                    else:
+                        continue
+                    if port.get('service_name') is not None:
+                        yield (port['port'], None, None, None)
+        elif use_product:
+            def _extract(rec):
+                for port in rec.get('ports', []):
+                    if port['port'] == -1:
+                        continue
+                    yield (port['port'], port.get('service_name'),
+                           port.get('service_product'))
+                    if not yieldall:
+                        continue
+                    if port.get('service_product') is not None:
+                        yield (port['port'], port.get('service_name'), None)
+                    else:
+                        continue
+                    if port.get('service_name') is not None:
+                        yield (port['port'], None, None)
+        elif use_service:
+            def _extract(rec):
+                for port in rec.get('ports', []):
+                    if port['port'] == -1:
+                        continue
+                    yield (port['port'], port.get('service_name'))
+                    if not yieldall:
+                        continue
+                    if port.get('service_name') is not None:
+                        yield (port['port'], None)
+        else:
+            def _extract(rec):
+                for port in rec.get('ports', []):
+                    if port['port'] == -1:
+                        continue
+                    yield (port['port'], )
+        n_features = len(features)
+        for rec in self.get(flt):
+            currec = [0] * n_features
+            for feat in _extract(rec):
+                try:
+                    currec[features[feat]] = 1
+                except KeyError:
+                    pass
+            yield (rec['addr'], currec)
+
     def diff_categories(self, category1, category2, flt=None,
                         include_both_open=True):
         """`category1` and `category2` must be categories (provided as str or
@@ -3311,6 +3448,7 @@ class MongoDBPassive(MongoDB, DBPassive):
     needunwind = ["infos.san"]
     ipaddr_fields = ["addr"]
     column_passive = 0
+    _features_column = 0
     indexes = [
         # passive
         [
@@ -3859,6 +3997,71 @@ setting values according to the keyword arguments.
         return self._distinct(self.columns[self.column_passive], field,
                               flt=flt, sort=sort, limit=limit, skip=skip)
 
+    def _features_port_list_pipeline(self, flt, use_service, use_product,
+                                     use_version):
+        return (
+            [{"$match": self.flt_and(flt, {'port': {'$exists': True}})}],
+            '$port',
+            '$infos',
+        )
+
+    def _features_port_get(self, features, flt, yieldall, use_service,
+                           use_product, use_version):
+        curaddr = None
+        currec = None
+        if use_version:
+            def _extract(rec):
+                info = rec.get('infos', {})
+                yield (rec['port'], info.get('service_name'),
+                       info.get('service_product'),
+                       info.get('service_version'))
+                if not yieldall:
+                    return
+                if info.get('service_version') is not None:
+                    yield (rec['port'], info.get('service_name'),
+                           info.get('service_product'), None)
+                if info.get('service_product') is not None:
+                    yield (rec['port'], info.get('service_name'), None, None)
+                if info.get('service_name') is not None:
+                    yield (rec['port'], None, None, None)
+        elif use_product:
+            def _extract(rec):
+                info = rec.get('infos', {})
+                yield (rec['port'], info.get('service_name'),
+                       info.get('service_product'))
+                if not yieldall:
+                    return
+                if info.get('service_product') is not None:
+                    yield (rec['port'], info.get('service_name'), None)
+                if info.get('service_name') is not None:
+                    yield (rec['port'], None, None)
+        elif use_service:
+            def _extract(rec):
+                info = rec.get('infos', {})
+                yield (rec['port'], info.get('service_name'))
+                if not yieldall:
+                    return
+                if info.get('service_name') is not None:
+                    yield (rec['port'], None)
+        else:
+            def _extract(rec):
+                yield (rec['port'], )
+        n_features = len(features)
+        for rec in self.get(self.flt_and(flt, {'port': {'$exists': True}}),
+                            sort=[('addr', 1)]):
+            # the addr aggregation could (should?) be done with an
+            # aggregation framework pipeline
+            if curaddr != rec['addr']:
+                if curaddr is not None:
+                    yield (curaddr, currec)
+                curaddr = rec['addr']
+                currec = [0] * n_features
+            for feat in _extract(rec):
+                # We could use += rec['count'] instead here
+                currec[features[feat]] = 1
+        if curaddr is not None:
+            yield (curaddr, currec)
+
     @staticmethod
     def searchrecontype(rectype):
         return {'recontype': rectype}
@@ -3958,49 +4161,28 @@ setting values according to the keyword arguments.
                 'source': 'cert',
                 'infos.pubkeyalgo': keytype + 'Encryption'}
 
-    @staticmethod
-    def _searchsja3(value_or_hash):
+    @classmethod
+    def _searchja3(cls, value_or_hash):
         if value_or_hash is None:
             return {}
-        if utils.HEX.search(value_or_hash):
-            key = {32: 'value', 40: 'infos.sha1',
-                   64: 'infos.sha256'}.get(len(value_or_hash), 'infos.raw')
-        else:
-            key = 'infos.raw'
-        if key == 'infos.raw':
-            return {'infos.raw': value_or_hash,
-                    'value': hashlib.new('md5',
-                                         value_or_hash.encode()).hexdigest()}
-        return {key: value_or_hash}
+        key, value = cls._ja3keyvalue(value_or_hash)
+        return {'value' if key == 'md5' else 'infos.%s' % key: value}
 
     @classmethod
     def searchja3client(cls, value_or_hash=None):
-        return dict(cls._searchsja3(value_or_hash), recontype='SSL_CLIENT',
+        return dict(cls._searchja3(value_or_hash), recontype='SSL_CLIENT',
                     source='ja3')
 
     @classmethod
     def searchja3server(cls, value_or_hash=None, client_value_or_hash=None):
-        base = dict(cls._searchsja3(value_or_hash), recontype='SSL_SERVER')
+        base = dict(cls._searchja3(value_or_hash), recontype='SSL_SERVER')
         if client_value_or_hash is None:
             return dict(base, source=re.compile('^ja3-'))
-        if utils.HEX.search(client_value_or_hash):
-            key = {32: 'md5', 40: 'infos.client.sha1',
-                   64: 'infos.client.sha256'}.get(len(client_value_or_hash),
-                                                  'infos.client.raw')
-        else:
-            key = 'infos.client.raw'
+        key, value = cls._ja3keyvalue(client_value_or_hash)
         if key == 'md5':
-            return dict(base, source='ja3-%s' % client_value_or_hash)
-        if key == 'infos.client.raw':
-            return dict(
-                base, source='ja3-%s' % hashlib.new(
-                    'md5',
-                    client_value_or_hash.encode(),
-                ).hexdigest(),
-                **{'infos.client.raw': client_value_or_hash}
-            )
+            return dict(base, source='ja3-%s' % value)
         return dict(base, source=re.compile('^ja3-'),
-                    **{key: client_value_or_hash})
+                    **{'infos.client.%s' % key: client_value_or_hash})
 
     @staticmethod
     def searchsshkey(keytype=None):

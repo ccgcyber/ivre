@@ -22,6 +22,7 @@ from __future__ import print_function
 
 from ast import literal_eval
 from contextlib import contextmanager
+from datetime import datetime
 from distutils.spawn import find_executable as which
 import errno
 from functools import reduce
@@ -994,7 +995,9 @@ which `predicate()` is True, given `webflt`.
                     query,
                     ivre.db.db.nmap.str2flt(ivre.db.db.nmap.flt2str(query))
                 )
-            # FIXME: test PostgreSQL indexes
+            if DATABASE == "postgres":
+                output = ivre.db.db.nmap.explain(ivre.db.db.nmap._get(query))
+                self.assertTrue("ix_n_scan_host" in output)
 
         count = ivre.db.db.nmap.count(ivre.db.db.nmap.searchx11())
         self.check_value("nmap_x11_count", count)
@@ -1274,6 +1277,79 @@ which `predicate()` is True, given `webflt`.
             "httphdr:content-type:/plain/i",
         )
 
+        columns, data = ivre.db.db.nmap.features(use_service=False)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_ports_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_ports_ndata", len(data))
+        columns, data = ivre.db.db.nmap.features()
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_services_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_services_ndata", len(data))
+        columns, data = ivre.db.db.nmap.features(use_product=True)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_products_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_products_ndata", len(data))
+        columns, data = ivre.db.db.nmap.features(use_version=True)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_versions_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_versions_ndata", len(data))
+        columns, data = ivre.db.db.nmap.features(yieldall=False,
+                                                 use_version=True)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_versions_noyieldall_ncolumns",
+                         ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_versions_noyieldall_ndata", len(data))
+
+        subflts = [(country, ivre.db.db.nmap.searchcountry(country))
+                   for country in ['FR', 'DE']]
+        columns, data = ivre.db.db.nmap.features(use_service=False,
+                                                 subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_ports_FRDE_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_ports_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.nmap.features(subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_services_FRDE_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_services_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.nmap.features(use_product=True,
+                                                 subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_products_FRDE_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_products_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.nmap.features(use_version=True,
+                                                 subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_versions_FRDE_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_versions_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.nmap.features(yieldall=False,
+                                                 use_version=True,
+                                                 subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("nmap_features_versions_noyieldall_FRDE_ncolumns",
+                         ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("nmap_features_versions_noyieldall_FRDE_ndata",
+                         len(data))
+
     def test_53_nmap_delete(self):
         # Remove
         addr = next(ivre.db.db.nmap.get(
@@ -1356,7 +1432,9 @@ which `predicate()` is True, given `webflt`.
             addr if isinstance(addr, basestring) else ivre.utils.int2ip(addr),
         ])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        if DATABASE not in ['postgres', 'sqlite']:
+            # There is a warning in postgresql for unused argument.
+            self.assertTrue(not err)
         self.assertGreater(out.count(b'\n'), result)
 
         result = ivre.db.db.passive.count(
@@ -1561,17 +1639,23 @@ which `predicate()` is True, given `webflt`.
         # searchtimeago() method
         res, out, err = RUN(["ivre", "ipinfo", "--timeago", "0"])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        if DATABASE not in ['postgres', 'sqlite']:
+            # There is a warning in postgresql for unused argument.
+            self.assertTrue(not err)
         self.assertEqual(out, b'')
 
         res, out, err = RUN(["ivre", "ipinfo", "--timeago", "10000000000"])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        if DATABASE not in ['postgres', 'sqlite']:
+            # There is a warning in postgresql for unused argument.
+            self.assertTrue(not err)
         self.assertNotEqual(out, b'')
 
         res, out, err = RUN(["ivre", "ipinfo", "--timeago", "0", "--count"])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        if DATABASE not in ['postgres', 'sqlite']:
+            # There is a warning in postgresql for unused argument.
+            self.assertTrue(not err)
         self.assertEqual(out, b'0\n')
 
         res, out, err = RUN(["ivre", "ipinfo",
@@ -1648,6 +1732,20 @@ which `predicate()` is True, given `webflt`.
                             break
                     else:
                         self.assertTrue(False)
+                    # For the raw value, let's try again with a
+                    # regular expression
+                    if field == 'infos.raw':
+                        for rec in ivre.db.db.passive.get(
+                                ivre.db.db.passive.searchja3client(
+                                    value_or_hash=re.compile(
+                                        '^' + re.escape(values["_id"]) + '$',
+                                    ),
+                                )
+                        ):
+                            if rec['count'] == values["count"]:
+                                break
+                        else:
+                            self.assertTrue(False)
         # Delete the reference on the cursor to close the connection
         # to the database (required for SQLite)
         del cur
@@ -1661,6 +1759,27 @@ which `predicate()` is True, given `webflt`.
                            rec1['source'][4:], rec1['infos']['client']['sha1'],
                            rec1['infos']['client']['sha1']]:
                 if value is None and clival is None:
+                    continue
+                for rec2 in ivre.db.db.passive.get(
+                    ivre.db.db.passive.searchja3server(
+                        value_or_hash=value,
+                        client_value_or_hash=clival,
+                    )
+                ):
+                    if rec1 == rec2:
+                        break
+                else:
+                    self.assertTrue(False)
+                # Run a new test for raw values using regular
+                # expressions
+                newtest = False
+                if value == rec1['infos']['raw']:
+                    value = re.compile('^' + re.escape(value) + '$')
+                    newtest = True
+                if clival == rec1['infos']['client']['raw']:
+                    clival = re.compile('^' + re.escape(clival) + '$')
+                    newtest = True
+                if not newtest:
                     continue
                 for rec2 in ivre.db.db.passive.get(
                     ivre.db.db.passive.searchja3server(
@@ -1700,14 +1819,18 @@ which `predicate()` is True, given `webflt`.
         # CLI: --limit / --skip / --sort
         # Using --limit should prevent ipinfo from selecting tailfnew mode
         res, _, err = RUN(["ivre", "ipinfo", "--limit", "1"])
-        self.assertTrue(not err)
+        if DATABASE not in ['postgres', 'sqlite']:
+            # There is a warning in postgresql for unused argument.
+            self.assertTrue(not err)
         self.assertEqual(res, 0)
         # Using --limit n with --json should produce at most n JSON
         # lines
         for count in 5, 10:
             res, out, err = RUN(["ivre", "ipinfo", "--limit", str(count),
                                  "--json"])
-            self.assertTrue(not err)
+            if DATABASE not in ['postgres', 'sqlite']:
+                # There is a warning in postgresql for unused argument.
+                self.assertTrue(not err)
             self.assertEqual(res, 0)
             out = out.decode().splitlines()
             self.assertEqual(len(out), count)
@@ -1718,23 +1841,31 @@ which `predicate()` is True, given `webflt`.
             for count in 5, 10:
                 res, out, err = RUN(["ivre", "ipinfo", "--limit", str(count),
                                      "--skip", str(skip), "--json"])
-                self.assertTrue(not err)
+                if DATABASE not in ['postgres', 'sqlite']:
+                    # There is a warning in postgresql for unused argument.
+                    self.assertTrue(not err)
                 self.assertEqual(res, 0)
                 out = out.decode().splitlines()
                 self.assertEqual(len(out), count)
                 for line in out:
                     json.loads(line)
         res, out1, err = RUN(["ivre", "ipinfo", "--limit", "1", "--json"])
-        self.assertTrue(not err)
+        if DATABASE not in ['postgres', 'sqlite']:
+            # There is a warning in postgresql for unused argument.
+            self.assertTrue(not err)
         self.assertEqual(res, 0)
         res, out2, err = RUN(["ivre", "ipinfo", "--limit", "1", "--skip", "1",
                               "--json"])
-        self.assertTrue(not err)
+        if DATABASE not in ['postgres', 'sqlite']:
+            # There is a warning in postgresql for unused argument.
+            self.assertTrue(not err)
         self.assertEqual(res, 0)
         self.assertFalse(out1 == out2)
         # Test --sort
         res, out, err = RUN(["ivre", "ipinfo", "--json", "--sort", "port"])
-        self.assertTrue(not err)
+        if DATABASE not in ['postgres', 'sqlite']:
+            # There is a warning in postgresql for unused argument.
+            self.assertTrue(not err)
         self.assertEqual(res, 0)
         port = 0
         for line in out.decode().splitlines():
@@ -1742,7 +1873,9 @@ which `predicate()` is True, given `webflt`.
             self.assertTrue(port <= nport)
             port = nport
         res, out, err = RUN(["ivre", "ipinfo", "--json", "--sort", "~port"])
-        self.assertTrue(not err)
+        if DATABASE not in ['postgres', 'sqlite']:
+            # There is a warning in postgresql for unused argument.
+            self.assertTrue(not err)
         self.assertEqual(res, 0)
         port = 65536
         for line in out.decode().splitlines():
@@ -1917,6 +2050,87 @@ which `predicate()` is True, given `webflt`.
                             ivre.db.db.passive.searchrecontype(
                                 'DNS_BLACKLIST')))
         self.check_value("passive_dnsbl_results_after_update", list_dnsbl)
+
+        if DATABASE != "sqlite":
+            # BUG in sqlite backend: same bug as "cannot use topvalues
+            # with JSON fields"
+            columns, data = ivre.db.db.passive.features(use_service=False)
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value("passive_features_ports_ncolumns", ncolumns)
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_ports_ndata", len(data))
+            columns, data = ivre.db.db.passive.features()
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value("passive_features_services_ncolumns", ncolumns)
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_services_ndata", len(data))
+            columns, data = ivre.db.db.passive.features(use_product=True)
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value("passive_features_products_ncolumns", ncolumns)
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_products_ndata", len(data))
+            columns, data = ivre.db.db.passive.features(use_version=True)
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value("passive_features_versions_ncolumns", ncolumns)
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_versions_ndata", len(data))
+            columns, data = ivre.db.db.passive.features(yieldall=False,
+                                                        use_version=True)
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value("passive_features_versions_noyieldall_ncolumns",
+                             ncolumns)
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_versions_noyieldall_ndata",
+                             len(data))
+
+            subflts = [(country, ivre.db.db.passive.searchcountry(country))
+                       for country in ['FR', 'DE']]
+            columns, data = ivre.db.db.passive.features(use_service=False,
+                                                        subflts=subflts)
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value("passive_features_ports_FRDE_ncolumns", ncolumns)
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_ports_FRDE_ndata", len(data))
+            columns, data = ivre.db.db.passive.features(subflts=subflts)
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value("passive_features_services_FRDE_ncolumns",
+                             ncolumns)
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_services_FRDE_ndata", len(data))
+            columns, data = ivre.db.db.passive.features(use_product=True,
+                                                        subflts=subflts)
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value("passive_features_products_FRDE_ncolumns",
+                             ncolumns)
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_products_FRDE_ndata", len(data))
+            columns, data = ivre.db.db.passive.features(use_version=True,
+                                                        subflts=subflts)
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value("passive_features_versions_FRDE_ncolumns",
+                             ncolumns)
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_versions_FRDE_ndata", len(data))
+            columns, data = ivre.db.db.passive.features(yieldall=False,
+                                                        use_version=True,
+                                                        subflts=subflts)
+            ncolumns = len(columns)
+            data = list(data)
+            self.check_value(
+                "passive_features_versions_noyieldall_FRDE_ncolumns", ncolumns,
+            )
+            self.assertTrue(all(len(d) == ncolumns for d in data))
+            self.check_value("passive_features_versions_noyieldall_FRDE_ndata",
+                             len(data))
 
     def test_54_passive_delete(self):
         total_count = ivre.db.db.passive.count(
@@ -2146,6 +2360,13 @@ which `predicate()` is True, given `webflt`.
                          ['0.0.0.0/0'])
         self.assertEqual(ivre.utils.net2range('0.0.0.0/0'),
                          ('0.0.0.0', '255.255.255.255'))
+        self.assertEqual(ivre.utils.net2range(
+            "::ffff:ffff:ffff:ffff/ffff:ffff:ffff:ffff:ffff::0"
+        ), ('::ffff:0:0:0', '::ffff:ffff:ffff:ffff'))
+        self.assertEqual(ivre.utils.net2range("192.168.0.0/255.255.255.0"),
+                         ('192.168.0.0', '192.168.0.255'))
+        self.assertEqual(ivre.utils.net2range("::/48"),
+                         ('::', '::ffff:ffff:ffff:ffff:ffff'))
 
         # String utils
         teststr = b"TEST STRING -./*'"
@@ -2232,6 +2453,7 @@ which `predicate()` is True, given `webflt`.
         )
 
         # get_addr_type()
+        # ipv4
         self.assertEqual(ivre.utils.get_addr_type('0.123.45.67'),
                          'Current-Net')
         self.assertIsNone(ivre.utils.get_addr_type('8.8.8.8'))
@@ -2245,12 +2467,89 @@ which `predicate()` is True, given `webflt`.
                          'Reserved')
         self.assertEqual(ivre.utils.get_addr_type('255.255.255.255'),
                          'Broadcast')
+        # ipv6
+        self.assertEqual(ivre.utils.get_addr_type('::'),
+                         'Unspecified')
+        self.assertEqual(ivre.utils.get_addr_type('::1'), 'Loopback')
+        self.assertIsNone(ivre.utils.get_addr_type('::ffff:8.8.8.8'))
+        self.assertEqual(ivre.utils.get_addr_type('64:ff9b::8.8.8.8'),
+                         'Well-known prefix')
+        self.assertEqual(ivre.utils.get_addr_type('100::'),
+                         'Discard (RTBH)')
+        self.assertEqual(ivre.utils.get_addr_type('2001::'),
+                         'Protocol assignements')
+        self.assertIsNone(ivre.utils.get_addr_type('2001:4860:4860::8888'))
+        self.assertEqual(ivre.utils.get_addr_type('2001:db8::db2'),
+                         'Documentation')
+        self.assertEqual(ivre.utils.get_addr_type('fc00::'),
+                         'Unique Local Unicast')
+        self.assertEqual(ivre.utils.get_addr_type('fe80::'),
+                         'Link Local Unicast')
+        self.assertEqual(ivre.utils.get_addr_type('ff00::'),
+                         'Multicast')
 
         # ip2int() / int2ip()
         self.assertEqual(ivre.utils.ip2int("1.0.0.1"), (1 << 24) + 1)
         self.assertEqual(ivre.utils.int2ip((1 << 24) + 1), "1.0.0.1")
         self.assertEqual(ivre.utils.ip2int('::2:0:0:0:2'), (2 << 64) + 2)
         self.assertEqual(ivre.utils.int2ip((2 << 64) + 2), '::2:0:0:0:2')
+        self.assertEqual(
+            ivre.utils.int2ip6(0x1234567890ABCDEFFED0000000004321),
+            '1234:5678:90ab:cdef:fed0::4321'
+        )
+        # ip2bin
+        # unicode error
+        self.assertEqual(
+            ivre.utils.ip2bin(b'\x33\xe6\x34\x35'),
+            b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff3\xe645'
+        )
+        with self.assertRaises(ValueError):
+            ivre.utils.ip2bin(b'\xe6')
+        # else case
+        with self.assertRaises(ValueError):
+            ivre.utils.ip2bin(b'23T')
+        self.assertEqual(
+            ivre.utils.ip2bin(b'23TT'),
+            b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff23TT'
+        )
+        self.assertEqual(ivre.utils.ip2bin(b'T3STTESTTESTTEST'),
+                         b'T3STTESTTESTTEST')
+        # str2pyval
+        self.assertEqual(ivre.utils.str2pyval("{'test': 0}"), {'test': 0})
+        self.assertEqual(ivre.utils.str2pyval("{'test: 0}"), "{'test: 0}")
+        # all2datetime
+        # NOTICE : compared to datetime.utcfromtimestamp
+        self.assertEqual(ivre.utils.all2datetime(1410532663),
+                         datetime(2014, 9, 12, 14, 37, 43))
+        self.assertEqual(ivre.utils.all2datetime(1410532663.0),
+                         datetime(2014, 9, 12, 14, 37, 43))
+
+        # fields2csv_head
+        self.assertItemsEqual(ivre.utils.fields2csv_head(
+            {"field": {"subfield": {"subsubfield": True,
+                                    "subsubfunc": lambda: None,
+                                    "notsubsubfield": False}}}),
+            ['field.subfield.subsubfield', 'field.subfield.subsubfunc']
+        )
+        # doc2csv
+        self.assertItemsEqual(
+            ivre.utils.doc2csv(
+                {"field": {
+                    "subfield": {"subsubfield": 1},
+                    "subvalue": 1
+                }},
+                {"field": {
+                    "subfield": {"subsubfield": lambda x: 0},
+                    "subvalue": True
+                }},
+            )[0],
+            [0, 1]
+        )
+        # serialize
+        self.assertEqual(
+            ivre.utils.serialize(re.compile("^test$", re.I | re.U)),
+            '/^test$/iu'
+        )
 
         # Math utils
         # http://stackoverflow.com/a/15285588/3223422
@@ -2278,6 +2577,12 @@ which `predicate()` is True, given `webflt`.
             self.assertTrue(is_prime(nbr) or len(factors) > 1)
             self.assertTrue(all(is_prime(x) for x in factors))
             self.assertEqual(reduce(lambda x, y: x * y, factors), nbr)
+        # Readables
+        self.assertEqual(ivre.utils.num2readable(1000), '1k')
+        self.assertEqual(
+            ivre.utils.num2readable(1000000000000000000000000), '1Y'
+        )
+        self.assertEqual(ivre.utils.num2readable(1049000.0), '1.049M')
 
         # Bro logs
         basepath = os.getenv('BRO_SAMPLES')
@@ -2331,6 +2636,16 @@ which `predicate()` is True, given `webflt`.
         self.assertTrue('FR' in ukfr)
         self.assertTrue('GB' in ukfr)
         self.assertEqual(ivre.utils.country_unalias('FR'), 'FR')
+
+        # Serveur port guess
+        self.assertEqual(ivre.utils.guess_srv_port(67, 68, proto='udp'), 1)
+        self.assertEqual(ivre.utils.guess_srv_port(65432, 80), -1)
+        self.assertEqual(ivre.utils.guess_srv_port(666, 666), 0)
+        # Certificate argument parsing
+        self.assertItemsEqual(
+            list(ivre.utils._parse_cert_subject('O = "Test\\", Inc."')),
+            [('O', 'Test", Inc.')]
+        )
 
     def test_scans(self):
         "Run scans, with and without agents"
@@ -2617,10 +2932,12 @@ which `predicate()` is True, given `webflt`.
         # Test insertion
         ret, out, _ = RUN(["ivre", "db2view", "--test", "passive"])
         self.assertEqual(ret, 0)
-        self.check_value("view_test_passive", len(out.splitlines()))
+        # One entry in test should actually be one entry at the end.
+        self.check_value("view_count_passive", len(out.splitlines()))
         ret, out, _ = RUN(["ivre", "db2view", "--test", "nmap"])
         self.assertEqual(ret, 0)
-        self.check_value("view_test_active", len(out.splitlines()))
+        # One entry in test should actually be one entry at the end.
+        self.check_value("view_count_active", len(out.splitlines()))
 
         view_count = 0
         # Count passive results
@@ -2652,7 +2969,6 @@ which `predicate()` is True, given `webflt`.
         ret, out, err = RUN(["ivre", "view"])
         self.assertEqual(ret, 0)
         self.assertTrue(not err)
-        self.assertEqual(len(out.splitlines()), view_count)
 
         # JSON
         ret, out, err = RUN(["ivre", "view", "--json"])
@@ -3046,6 +3362,79 @@ which `predicate()` is True, given `webflt`.
             ["--useragent", regexp],
             "useragent:%s" % regexp,
         )
+
+        columns, data = ivre.db.db.view.features(use_service=False)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_ports_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_ports_ndata", len(data))
+        columns, data = ivre.db.db.view.features()
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_services_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_services_ndata", len(data))
+        columns, data = ivre.db.db.view.features(use_product=True)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_products_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_products_ndata", len(data))
+        columns, data = ivre.db.db.view.features(use_version=True)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_versions_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_versions_ndata", len(data))
+        columns, data = ivre.db.db.view.features(yieldall=False,
+                                                 use_version=True)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_versions_noyieldall_ncolumns",
+                         ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_versions_noyieldall_ndata", len(data))
+
+        subflts = [(country, ivre.db.db.view.searchcountry(country))
+                   for country in ['FR', 'DE']]
+        columns, data = ivre.db.db.view.features(use_service=False,
+                                                 subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_ports_FRDE_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_ports_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.view.features(subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_services_FRDE_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_services_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.view.features(use_product=True,
+                                                 subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_products_FRDE_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_products_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.view.features(use_version=True,
+                                                 subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_versions_FRDE_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_versions_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.view.features(yieldall=False,
+                                                 use_version=True,
+                                                 subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("view_features_versions_noyieldall_FRDE_ncolumns",
+                         ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("view_features_versions_noyieldall_FRDE_ndata",
+                         len(data))
 
     def test_conf(self):
         # Ensure env var IVRE_CONF is taken into account

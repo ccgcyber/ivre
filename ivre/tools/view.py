@@ -34,6 +34,7 @@ from builtins import input
 
 from ivre import graphroute
 from ivre.db import db
+from ivre.nmapout import displayhosts
 from ivre.activecli import display_short, display_distinct, \
     displayfunction_json, displayfunction_honeyd, displayfunction_nmapxml, \
     displayfunction_gnmap, displayfunction_graphroute, \
@@ -134,9 +135,12 @@ def main():
     if args.short:
         display_short(db.view, flt, sortkeys, args.limit, args.skip)
         sys.exit(0)
-    elif args.distinct is not None:
+    if args.distinct is not None:
         display_distinct(db.view, args.distinct, flt, sortkeys,
                          args.limit, args.skip)
+        sys.exit(0)
+    if args.explain:
+        displayfunction_explain(flt, db.view)
         sys.exit(0)
     if args.json:
         def displayfunction(x):
@@ -155,9 +159,6 @@ def main():
                 x, args.graphroute, args.graphroute_include,
                 args.graphroute_dont_reset
             )
-    elif args.explain:
-        def displayfunction(x):
-            return displayfunction_explain(x, db.view)
     elif args.delete:
         def displayfunction(x):
             return displayfunction_remove(x, db.view)
@@ -170,8 +171,7 @@ def main():
     else:
 
         def displayfunction(cursor):
-            for rec in cursor:
-                sys.stdout.write(str(rec) + '\n')
+            displayhosts(cursor, out=sys.stdout)
 
     if args.update_schema:
         db.db.nmap.migrate_schema(args.version)

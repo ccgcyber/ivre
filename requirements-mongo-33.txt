@@ -1,4 +1,4 @@
+pymongo>=2.7.2,<=3.7.2
 pycrypto
-sqlalchemy==1.1.15
 future
 bottle

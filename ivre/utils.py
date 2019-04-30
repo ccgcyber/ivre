@@ -36,7 +36,7 @@ import bz2
 import codecs
 import datetime
 import errno
-from functools import reduce
+import functools
 import gzip
 import hashlib
 import json
@@ -173,6 +173,7 @@ mapping.
         return struct.pack('!QQ', ipval >> 64, ipval & 0xffffffffffffffff)
     except TypeError:
         pass
+    raw_ipval = ipval
     try:
         ipval = ipval.decode()
     except UnicodeDecodeError:
@@ -195,9 +196,9 @@ mapping.
         pass
     # Probably already a binary representation
     if len(ipval) == 16:
-        return ipval
+        return raw_ipval
     if len(ipval) == 4:
-        return b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff' + ipval
+        return b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff' + raw_ipval
     raise ValueError('Invalid IP address %r' % ipval)
 
 
@@ -305,20 +306,49 @@ def get_domains(name):
     return ('.'.join(name[i:]) for i in range(len(name)))
 
 
+def _espace_slash(string):
+    """This function transforms '\\/' in '/' but leaves '\\\\/' unchanged. This
+    is useful to parse regexp from Javascript style (/regexp/).
+
+    """
+    escaping = False
+    new_string = ""
+    for char in string:
+        if not escaping and char == '\\':
+            escaping = True
+        elif escaping and char != '/':
+            new_string += '\\' + char
+            escaping = False
+        else:
+            new_string += char
+            escaping = False
+    return new_string
+
+
+def _escape_first_slash(string):
+    """This function removes the first '\\' if the string starts with '\\/'."""
+    if string.startswith('\\/'):
+        string = string[1:]
+    return string
+
+
 def str2regexp(string):
     """This function takes a string and returns either this string or
     a python regexp object, when the string is using the syntax
     /regexp[/flags].
-
     """
     if string.startswith('/'):
         string = string[1:].rsplit('/', 1)
+        # Enable slash-escape even if it is not necessary
+        string[0] = _espace_slash(string[0])
         if len(string) == 1:
             string.append('')
         string = re.compile(
             string[0],
             sum(getattr(re, f.upper()) for f in string[1])
         )
+    else:
+        string = _escape_first_slash(string)
     return string
 
 
@@ -433,8 +463,11 @@ def all2datetime(arg):
     if isinstance(arg, datetime.datetime):
         return arg
     if isinstance(arg, basestring):
-        return datetime.datetime.strptime(arg, '%Y-%m-%d %H:%M:%S')
-    if isinstance(arg, int_types):
+        try:
+            return datetime.datetime.strptime(arg, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return datetime.datetime.strptime(arg, '%Y-%m-%d %H:%M:%S.%f')
+    if isinstance(arg, int_types) or isinstance(arg, float):
         return datetime.datetime.fromtimestamp(arg)
     else:
         raise TypeError("%s is of unknown type." % repr(arg))
@@ -853,7 +886,7 @@ def country_unalias(country):
     if isinstance(country, basestring):
         return COUNTRY_ALIASES.get(country, country)
     if hasattr(country, '__iter__'):
-        return reduce(
+        return functools.reduce(
             lambda x, y: x + (y if isinstance(y, list) else [y]),
             (country_unalias(country_elt) for country_elt in country),
             [],
@@ -1340,7 +1373,12 @@ def parse_ssh_key(data):
         data = data[4 + length:]
 
 
+# https://www.iana.org/assignments/ipv6-address-space/ipv6-address-space.xhtml
+# Consulted february 2019
 _ADDR_TYPES = [
+    "Unspecified",
+    "Loopback",
+    "Reserved",
     "Current-Net",
     None,
     "Private",
@@ -1360,28 +1398,68 @@ _ADDR_TYPES = [
     "Multicast",
     "Reserved",
     "Broadcast",
+    "Reserved",
+    "Well-known prefix",
+    "Reserved",
+    # RFC 6666 Remote Triggered Black Hole
+    "Discard (RTBH)",
+    "Reserved",
+    None,
+    "Protocol assignements",
+    None,
+    "Documentation",
+    None,
+    "6to4",
+    None,
+    "Reserved",
+    "Unique Local Unicast",
+    "Reserved",
+    "Link Local Unicast",
+    "Reserved",
+    "Multicast",
 ]
 
 _ADDR_TYPES_LAST_IP = [
-    ip2int("0.255.255.255"),
-    ip2int("9.255.255.255"),
-    ip2int("10.255.255.255"),
-    ip2int("100.63.255.255"),
-    ip2int("100.127.255.255"),
-    ip2int("126.255.255.255"),
-    ip2int("127.255.255.255"),
-    ip2int("169.253.255.255"),
-    ip2int("169.254.255.255"),
-    ip2int("172.15.255.255"),
-    ip2int("172.31.255.255"),
-    ip2int("192.88.98.255"),
-    ip2int("192.88.99.255"),
-    ip2int("192.167.255.255"),
-    ip2int("192.168.255.255"),
-    ip2int("223.255.255.255"),
-    ip2int("239.255.255.255"),
-    ip2int("255.255.255.254"),
-    ip2int("255.255.255.255"),
+    ip2int("::"),
+    ip2int("::1"),
+    ip2int("::fffe:ffff:ffff"),
+    ip2int("::ffff:0.255.255.255"),
+    ip2int("::ffff:9.255.255.255"),
+    ip2int("::ffff:10.255.255.255"),
+    ip2int("::ffff:100.63.255.255"),
+    ip2int("::ffff:100.127.255.255"),
+    ip2int("::ffff:126.255.255.255"),
+    ip2int("::ffff:127.255.255.255"),
+    ip2int("::ffff:169.253.255.255"),
+    ip2int("::ffff:169.254.255.255"),
+    ip2int("::ffff:172.15.255.255"),
+    ip2int("::ffff:172.31.255.255"),
+    ip2int("::ffff:192.88.98.255"),
+    ip2int("::ffff:192.88.99.255"),
+    ip2int("::ffff:192.167.255.255"),
+    ip2int("::ffff:192.168.255.255"),
+    ip2int("::ffff:223.255.255.255"),
+    ip2int("::ffff:239.255.255.255"),
+    ip2int("::ffff:255.255.255.254"),
+    ip2int("::ffff:255.255.255.255"),
+    ip2int("64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("64:ff9b::ffff:ffff"),
+    ip2int("ff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("100::ffff:ffff:ffff:ffff"),
+    ip2int("1fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("2001:db7:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("3fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ip2int("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
 ]
 
 
@@ -1389,13 +1467,13 @@ def get_addr_type(addr):
     """Returns the type (Private, Loopback, etc.) of an IPv4 address, or
 None if it is a "normal", usable address.
 
-    TODO: implement IPv6
-
     """
+
+    if ':' not in addr:
+        addr = "::ffff:" + addr
     try:
         addr = ip2int(addr)
     except (TypeError, socket.error):
-        # FIXME no IPv6 support
         return None
     return _ADDR_TYPES[bisect_left(_ADDR_TYPES_LAST_IP, addr)]
 
@@ -1579,3 +1657,38 @@ def display_top(db, arg, flt, lmt):
             entry['_id'] = json.dumps(entry['_id'],
                                       default=serialize)
         print("%(_id)s: %(count)d" % entry)
+
+
+if PY3:
+
+    # https://stackoverflow.com/a/26348624
+    @functools.total_ordering
+    class MinValue(object):
+        def __le__(self, other):
+            return True
+
+        def __eq__(self, other):
+            return self is other
+
+    MIN_VALUE = MinValue()
+
+    def key_sort_none(value):
+        """This function can be used as `key=` argument for sorted() and
+.sort(), in order to sort values that can be of a certain type (e.g.,
+str), or None, so that None is always lower.
+
+We just need to replace None with MIN_VALUE, which is an object that
+happily compares with anything, and is lower than anything.
+
+        """
+        if value is None:
+            return MIN_VALUE
+        return value
+
+else:
+    def key_sort_none(value):
+        """In Python 2, None is lower than most types (int, str, etc.), so we
+have nothing to do here.
+
+        """
+        return value
