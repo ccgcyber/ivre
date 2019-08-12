@@ -1,4 +1,5 @@
 [![Build Status](https://travis-ci.org/cea-sec/ivre.svg)](https://travis-ci.org/cea-sec/ivre)
+[![Documentation Status](https://readthedocs.org/projects/ivre/badge/?version=latest)](https://doc.ivre.rocks/en/latest/?badge=latest)
 [![Codacy Badge](https://api.codacy.com/project/badge/Grade/0116170aaaa54915a72aad286029250b)](https://app.codacy.com/app/p-l-/ivre)
 [![Join the chat at Gitter](https://badges.gitter.im/cea-sec/ivre.svg)](https://gitter.im/cea-sec/ivre)
 [![Follow on Twitter](https://img.shields.io/twitter/follow/IvreRocks.svg?logo=twitter)](https://twitter.com/IvreRocks)
@@ -28,7 +29,9 @@ Taullier".
 ## Overview ##
 
 You can have a look at the [project homepage](https://ivre.rocks/),
-the **[screenshot gallery](doc/SCREENSHOTS.md)**, and the
+the
+**[screenshot gallery](https://doc.ivre.rocks/en/latest/overview/screenshots.html)**,
+and the
 [quick video introduction](https://www.youtube.com/watch?v=GBu5QMq6ewY)
 for an overview of the Web interface.
 
@@ -41,16 +44,15 @@ have been written to show some features of IVRE.
 
 ## Documentation ##
 
-See [doc/README](doc/README.md) (and `doc/*` files) for more
-information.
+[IVRE's documentation](https://doc.ivre.rocks/) is hosted by Read The
+Docs, based on files from the [doc/](doc/) directory of the
+repository.
 
-On a server with the IVRE web server properly installed with a
-Dokuwiki notepad, the `doc/*` files are available under the `doc:`
-namespace (e.g., `doc:readme` for the [doc/README](doc/README.md)
-file).
+On an IVRE web server, the `doc/*` files are available, rendered,
+under `/doc/`.
 
-On a client with IVRE installed, you can use a `--help` option with
-most IVRE CLI tools, and use `help(ivre.module)` with most IVRE Python
+On a system with IVRE installed, you can use a `--help` option with
+most IVRE CLI tools, and `help(ivre.module)` with most IVRE Python
 sub-modules.
 
 ## License ##
@@ -66,15 +68,16 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-[along with IVRE](doc/LICENSE.md). If not, see [the gnu.org web
-site](http://www.gnu.org/licenses/).
+[along with IVRE](doc/license.rst). If not, see
+[the gnu.org web site](http://www.gnu.org/licenses/).
 
 ## Support ##
 
 Try `--help` for the CLI tools, `help()` under Python and the "HELP"
 button in the web interface.
 
-Have a look at the [FAQ](doc/FAQ.md)!
+Have a look at the
+[FAQ](https://doc.ivre.rocks/en/latest/overview/faq.html)!
 
 Feel free to contact the author and offer him a beer if you need help!
 
@@ -101,10 +104,6 @@ You can also join the
 [Gitter conversation](https://gitter.im/cea-sec/ivre) (that is the
 preferred way to get in touch for questions), or use the e-mail `dev`
 on the domain `ivre.rocks`.
-
-You can try to join the IRC chan
-[#ivre](irc://irc.freenode.net/%23ivre) on
-[Freenode](https://freenode.net/).
 
 ## Talking about IVRE ##
 

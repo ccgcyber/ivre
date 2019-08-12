@@ -155,7 +155,7 @@ class PostgresDBActive(PostgresDB, SQLDBActive):
     def __init__(self, url):
         super(PostgresDBActive, self).__init__(url)
 
-    def __migrate_schema_10_11(self):
+    def _migrate_schema_10_11(self):
         """Converts a record from version 10 to version 11.
 
 The PostgreSQL backend is only conerned by a limited subset of
@@ -892,12 +892,11 @@ insert structures.
                      "_id": result[1:] if len(result) > 2 else result[1]}
                     for result in
                     self.db.execute(req.order_by(order).limit(topnbr)))
-        else:
-            return ({"count": result[0],
-                     "_id": outputproc(result[1:] if len(result) > 2
-                                       else result[1])}
-                    for result in
-                    self.db.execute(req.order_by(order).limit(topnbr)))
+        return ({"count": result[0],
+                 "_id": outputproc(result[1:] if len(result) > 2
+                                   else result[1])}
+                for result in
+                self.db.execute(req.order_by(order).limit(topnbr)))
 
     def _features_port_list(self, flt, yieldall, use_service,
                             use_product, use_version):
@@ -931,10 +930,9 @@ insert structures.
         if not yieldall:
             req = req.order_by(*(nullsfirst(fld) for fld in fields))
             return self.db.execute(req)
-        else:
-            # results will be modified, we cannot keep a RowProxy
-            # instance, so we convert the results to lists
-            return (list(rec) for rec in self.db.execute(req))
+        # results will be modified, we cannot keep a RowProxy
+        # instance, so we convert the results to lists
+        return (list(rec) for rec in self.db.execute(req))
 
     def _features_port_get(self, features, flt, yieldall, use_service,
                            use_product, use_version):

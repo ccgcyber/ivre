@@ -1,5 +1,5 @@
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -46,11 +46,12 @@ COPY doku-conf-acl.auth.php var/www/dokuwiki/conf/acl.auth.php
 COPY doku-conf-users.auth.php var/www/dokuwiki/conf/users.auth.php
 RUN chown -Rh www-data:www-data var/www/dokuwiki/data var/www/dokuwiki/conf var/www/dokuwiki/lib/plugins
 
-# Needed by Neo4j
-RUN mkdir /var/www/.neo4j && chown www-data:www-data /var/www/.neo4j
+# Use a version-independent service name
+RUN ln -s /etc/init.d/php?*-fpm /etc/init.d/php-fpm
 
 EXPOSE 80
-CMD service php7.0-fpm start && \
+CMD service php-fpm start && \
+    ln -s /var/run/php/php?*-fpm.sock /var/run/php/php-fpm.sock && \
     service fcgiwrap start && \
     for d in "" /local; do if [ -f "/usr$d/share/ivre/web/wsgi/app.wsgi" ]; \
       then APP="/usr$d/share/ivre/web/wsgi/app.wsgi"; break; fi; done && \

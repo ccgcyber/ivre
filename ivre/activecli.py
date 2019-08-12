@@ -70,7 +70,7 @@ def _getscript(port, sname):
 def _nmap_port2honeyd_action(port):
     if port['state_state'] == 'closed':
         return 'reset'
-    elif port['state_state'] != 'open':
+    if port['state_state'] != 'open':
         return 'block'
     # if 'service_tunnel' in port and port['service_tunnel'] == 'ssl':
     #     sslrelay = True
@@ -79,7 +79,7 @@ def _nmap_port2honeyd_action(port):
     if 'service_name' in port:
         if port['service_name'] == 'tcpwrapped':
             return '"true"'
-        elif port['service_name'] == 'ssh':
+        if port['service_name'] == 'ssh':
             s = _getscript(port, 'banner')
             if s is not None:
                 banner = s['output']
@@ -121,7 +121,7 @@ def _display_honeyd_conf(host, honeyd_routes, honeyd_entries, out=sys.stdout):
             # let's skip pseudo-port records that are only containers for host
             # scripts.
             pass
-    if 'traces' in host and len(host['traces']) > 0:
+    if 'traces' in host and host['traces'] > 0:
         trace = max(host['traces'], key=lambda x: len(x['hops']))['hops']
         if trace:
             trace.sort(key=lambda x: x['ttl'])
@@ -481,14 +481,14 @@ def displayfunction_graphroute(cur, arg, gr_include, gr_dont_reset):
             def cluster(ipaddr):
                 res = db.db.data.as_byip(ipaddr)
                 if res is None:
-                    return
+                    return None
                 return (res['as_num'],
                         "%(as_num)d\n[%(as_name)s]" % res)
         elif arg == "Country":
             def cluster(ipaddr):
                 res = db.db.data.country_byip(ipaddr)
                 if res is None:
-                    return
+                    return None
                 return (res['country_code'],
                         "%(country_code)s - %(country_name)s" % res)
         else:

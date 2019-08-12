@@ -22,7 +22,6 @@
 
 from __future__ import print_function
 import getopt
-import re
 import sys
 try:
     reload(sys)
@@ -34,9 +33,6 @@ else:
 
 from ivre.db import db
 from ivre import utils
-
-
-IPADDR = re.compile('^\\d+\\.\\d+\\.\\d+\\.\\d+$')
 
 
 def disp_rec(r):
@@ -51,11 +47,13 @@ def disp_rec(r):
                 firstseen,
                 lastseen,
             ))
-        elif r['source'].startswith('A-'):
-            print('%s A %s (%s, %s time%s, %s - %s)' % (
+        elif r['source'].startswith('A-') or r['source'].startswith('AAAA-'):
+            print('%s %s %s (%s, %s time%s, %s - %s)' % (
                 r['value'],
+                r['source'].split('-', 1)[0],
                 utils.force_int2ip(r['addr']),
-                r['source'][2:], r['count'],
+                ':'.join(r['source'].split('-')[1:]),
+                r['count'],
                 r['count'] > 1 and 's' or '',
                 firstseen,
                 lastseen,
@@ -66,7 +64,7 @@ def disp_rec(r):
         if r['source'].split('-')[0] in ['CNAME', 'NS', 'MX']:
             print('%s %s %s (%s, %s time%s, %s - %s)' % (
                 r['value'],
-                r['source'].split('-')[0],
+                r['source'].split('-', 1)[0],
                 r['targetval'],
                 ':'.join(r['source'].split('-')[1:]),
                 r['count'],
@@ -118,7 +116,7 @@ def main():
             first = False
         else:
             print()
-        if IPADDR.match(a) or a.isdigit():
+        if utils.IPADDR.search(a) or a.isdigit():
             flts.append(db.passive.flt_and(baseflt, db.passive.searchhost(a)))
         else:
             flts += [

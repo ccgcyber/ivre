@@ -59,7 +59,7 @@ except ImportError:
 
 
 from builtins import bytes, int as int_types, object, range, str
-from future.utils import PY3, viewitems
+from future.utils import PY3, viewitems, viewvalues
 from past.builtins import basestring
 
 
@@ -82,6 +82,77 @@ REGEXP_T = type(re.compile(''))
 HEX = re.compile('^[a-f0-9]+$', re.IGNORECASE)
 
 
+# IP address regexp, based on
+# https://gist.github.com/dfee/6ed3a4b05cfe7a6faf40a2102408d5d8
+
+# _IPV4SEG = r'(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])'
+# _IPV4ADDR = r'(?:(?:%s\.){3,3}%s)' % (_IPV4SEG, _IPV4SEG)
+# _IPV6SEG = r'(?:(?:[0-9a-fA-F]){1,4})'
+# _IPV6GROUPS = (
+#     r'(?:%s:){7,7}%s' % (_IPV6SEG, _IPV6SEG),
+#     r'(?:%s:){1,7}:' % (_IPV6SEG, ),
+#     r'(?:%s:){1,6}:%s' % (_IPV6SEG, _IPV6SEG),
+#     r'(?:%s:){1,5}(?::%s){1,2}' % (_IPV6SEG, _IPV6SEG),
+#     r'(?:%s:){1,4}(?::%s){1,3}' % (_IPV6SEG, _IPV6SEG),
+#     r'(?:%s:){1,3}(?::%s){1,4}' % (_IPV6SEG, _IPV6SEG),
+#     r'(?:%s:){1,2}(?::%s){1,5}' % (_IPV6SEG, _IPV6SEG),
+#     r'%s:(?:(?::%s){1,6})' % (_IPV6SEG, _IPV6SEG),
+#     r':(?:(?::%s){1,7}|:)' % (_IPV6SEG, ),
+#     r'fe80:(?::%s){0,4}%%[0-9a-zA-Z]{1,}' % (_IPV6SEG, ),
+#     r'::(?:ffff(?::0{1,4}){0,1}:){0,1}%s' % (_IPV4ADDR, ),
+#     r'(?:%s:){1,4}:%s' % (_IPV6SEG, _IPV4ADDR),
+# )
+# _IPV6ADDR = '|'.join(
+#     # Reverse rows for greedy match
+#     '(?:%s)' % g for g in _IPV6GROUPS[::-1]
+# )
+# _IPADDR = '^(%s|%s)$' % (_IPV4ADDR, _IPV6ADDR)
+# _NETMASK = r'(?:12[0-8]|1[0-1][0-9]|0?[0-9]{1,2})'
+# _NETADDR = '^(%s|%s)/(%s|%s)$' % (_IPV4ADDR, _IPV6ADDR, _NETMASK, _IPV4ADDR)
+IPADDR = re.compile(
+    '^((?:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(?:25[0-5]|('
+    '?:2[0-4]|1{0,1}[0-9]){0,1}[0-9]))|(?:(?:(?:(?:[0-9a-fA-F]){1,4}):){1,4}:('
+    '?:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(?:25[0-5]|(?:2'
+    '[0-4]|1{0,1}[0-9]){0,1}[0-9])))|(?:::(?:ffff(?::0{1,4}){0,1}:){0,1}(?:(?:'
+    '(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(?:25[0-5]|(?:2[0-4]'
+    '|1{0,1}[0-9]){0,1}[0-9])))|(?:fe80:(?::(?:(?:[0-9a-fA-F]){1,4})){0,4}%[0-'
+    '9a-zA-Z]{1,})|(?::(?:(?::(?:(?:[0-9a-fA-F]){1,4})){1,7}|:))|(?:(?:(?:[0-9'
+    'a-fA-F]){1,4}):(?:(?::(?:(?:[0-9a-fA-F]){1,4})){1,6}))|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,2}(?::(?:(?:[0-9a-fA-F]){1,4})){1,5})|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,3}(?::(?:(?:[0-9a-fA-F]){1,4})){1,4})|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,4}(?::(?:(?:[0-9a-fA-F]){1,4})){1,3})|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,5}(?::(?:(?:[0-9a-fA-F]){1,4})){1,2})|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,6}:(?:(?:[0-9a-fA-F]){1,4}))|(?:(?:(?:(?:[0-9a-fA-F]){1,'
+    '4}):){1,7}:)|(?:(?:(?:(?:[0-9a-fA-F]){1,4}):){7,7}(?:(?:[0-9a-fA-F]){1,4}'
+    ')))$',
+    re.I,
+)
+NETADDR = re.compile(
+    '^((?:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(?:25[0-5]|('
+    '?:2[0-4]|1{0,1}[0-9]){0,1}[0-9]))|(?:(?:(?:(?:[0-9a-fA-F]){1,4}):){1,4}:('
+    '?:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(?:25[0-5]|(?:2'
+    '[0-4]|1{0,1}[0-9]){0,1}[0-9])))|(?:::(?:ffff(?::0{1,4}){0,1}:){0,1}(?:(?:'
+    '(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(?:25[0-5]|(?:2[0-4]'
+    '|1{0,1}[0-9]){0,1}[0-9])))|(?:fe80:(?::(?:(?:[0-9a-fA-F]){1,4})){0,4}%[0-'
+    '9a-zA-Z]{1,})|(?::(?:(?::(?:(?:[0-9a-fA-F]){1,4})){1,7}|:))|(?:(?:(?:[0-9'
+    'a-fA-F]){1,4}):(?:(?::(?:(?:[0-9a-fA-F]){1,4})){1,6}))|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,2}(?::(?:(?:[0-9a-fA-F]){1,4})){1,5})|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,3}(?::(?:(?:[0-9a-fA-F]){1,4})){1,4})|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,4}(?::(?:(?:[0-9a-fA-F]){1,4})){1,3})|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,5}(?::(?:(?:[0-9a-fA-F]){1,4})){1,2})|(?:(?:(?:(?:[0-9a-'
+    'fA-F]){1,4}):){1,6}:(?:(?:[0-9a-fA-F]){1,4}))|(?:(?:(?:(?:[0-9a-fA-F]){1,'
+    '4}):){1,7}:)|(?:(?:(?:(?:[0-9a-fA-F]){1,4}):){7,7}(?:(?:[0-9a-fA-F]){1,4}'
+    ')))/((?:12[0-8]|1[0-1][0-9]|0?[0-9]{1,2})|(?:(?:(?:25[0-5]|(?:2[0-4]|1{0,'
+    '1}[0-9]){0,1}[0-9])\\.){3,3}(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9]))'
+    ')$',
+    re.I,
+)
+IPV4ADDR = re.compile(
+    '^(?:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(?:25[0-5]|(?'
+    ':2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$',
+    re.I
+)
+
 NMAP_FINGERPRINT_IVRE_KEY = {
     # TODO: cpe
     'd': 'service_devicetype',
@@ -91,7 +162,6 @@ NMAP_FINGERPRINT_IVRE_KEY = {
     'p': 'service_product',
     'v': 'service_version',
 }
-
 
 logging.basicConfig()
 
@@ -188,11 +258,13 @@ mapping.
     try:
         return (b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff' +
                 socket.inet_aton(ipval))
-    except socket.error:
+    except (socket.error, ValueError, TypeError):
+        # Value and Type Errors when correct unicode but
+        # already a binary representation
         pass
     try:
         return socket.inet_pton(socket.AF_INET6, ipval)
-    except socket.error:
+    except (socket.error, ValueError, TypeError):
         pass
     # Probably already a binary representation
     if len(ipval) == 16:
@@ -381,8 +453,7 @@ def regexp2pattern(string):
         else:
             string += patterns[2]
         return string, flags
-    else:
-        return re.escape(string), re.UNICODE if isinstance(string, str) else 0
+    return re.escape(string), re.UNICODE if isinstance(string, str) else 0
 
 
 def str2list(string):
@@ -467,10 +538,9 @@ def all2datetime(arg):
             return datetime.datetime.strptime(arg, '%Y-%m-%d %H:%M:%S')
         except ValueError:
             return datetime.datetime.strptime(arg, '%Y-%m-%d %H:%M:%S.%f')
-    if isinstance(arg, int_types) or isinstance(arg, float):
+    if isinstance(arg, (int_types, float)):
         return datetime.datetime.fromtimestamp(arg)
-    else:
-        raise TypeError("%s is of unknown type." % repr(arg))
+    raise TypeError("%s is of unknown type." % repr(arg))
 
 
 def makedirs(dirname):
@@ -728,7 +798,7 @@ def serialize(obj):
 
 
 class LogFilter(logging.Filter):
-    """A logging filter that prevents dupplicate warnings and only reports
+    """A logging filter that prevents duplicate warnings and only reports
 messages with level lower than INFO when config.DEBUG (or
 config.DEBUG_DB) is True.
 
@@ -807,10 +877,10 @@ def create_argparser(description, extraargs=None):
                 raise optparse.OptionError(
                     'unrecognized arguments', res[1]
                 )
-        else:
-            res = parser.parse_args_orig()
-            res[0].ensure_value(extraargs, res[1])
-            return res[0]
+            return None
+        res = parser.parse_args_orig()
+        res[0].ensure_value(extraargs, res[1])
+        return res[0]
 
     parser.parse_args = my_parse_args
     parser.add_argument = parser.add_option
@@ -923,6 +993,7 @@ def screenwords(imgdata):
                         break
         if result:
             return result
+    return None
 
 
 if USE_PIL:
@@ -946,7 +1017,7 @@ if USE_PIL:
             bbox = diffbkg.getbbox()
             if not bbox:
                 # Image no longer exists after trim
-                return
+                return None
             if result is None:
                 result = bbox
             elif _img_size(bbox) < _img_size(result):
@@ -1118,8 +1189,8 @@ def _read_nmap_probes():
     try:
         with open(os.path.join(config.NMAP_SHARE_PATH, 'nmap-service-probes'),
                   'rb') as fdesc:
-            for line in fdesc:
-                parse_line(line[:-1])
+            for l in fdesc:
+                parse_line(l[:-1])
     except (AttributeError, TypeError, IOError):
         LOGGER.warning('Cannot read Nmap service fingerprint file.',
                        exc_info=True)
@@ -1199,6 +1270,7 @@ def find_ike_vendor_id(vendorid):
     for name, sig in get_ikescan_vendor_ids():
         if sig.search(vid):
             return name
+    return None
 
 
 # Nmap (and Bro) encoding & decoding
@@ -1288,22 +1360,30 @@ def nmap_svc_fp_format_data(data, match):
     for i, value in enumerate(match.groups()):
         if value is None:
             if '$%d' % (i + 1) in data:
-                return
+                return None
             continue
         data = data.replace('$%d' % (i + 1), nmap_encode_data(value))
     return data
 
 
-def normalize_props(props):
+def normalize_props(props, braces=True):
     """Returns a normalized property list/dict so that (roughly):
-        - a list gives {k: "{k}"}
-        - a dict gives {k: v if v is not None else "{%s}" % v}
+        - a list gives {k: "{k}"} if braces=True, {k: "k"} otherwise
+        - a dict gives {k: v if v is not None else "{%s}" % v} if braces=True,
+                       {k: v if v is not Node else "%s" % v} otherwise
     """
     if not isinstance(props, dict):
         props = dict.fromkeys(props)
+    # Remove braces if necessary
+    if not braces:
+        for key, value in viewitems(props):
+            if (isinstance(value, basestring) and value.startswith('{') and
+                    value.endswith('}')):
+                props[key] = value[1:-1]
+    form = "{%s}" if braces else "%s"
     props = dict(
         (key, (value if isinstance(value, basestring) else
-               ("{%s}" % key) if value is None else
+               (form % key) if value is None else
                str(value))) for key, value in viewitems(props)
     )
     return props
@@ -1317,6 +1397,31 @@ datetime.datetime instance `dtm`"""
         return dtm.timestamp()
     except AttributeError:
         return time.mktime(dtm.timetuple()) + dtm.microsecond / (1000000.)
+
+
+def tz_offset(timestamp=None):
+    """
+    Returns the offset between UTC and local time at "timestamp".
+    """
+    if timestamp is None:
+        timestamp = time.time()
+    utc_offset = (datetime.datetime.fromtimestamp(timestamp) -
+                  datetime.datetime.utcfromtimestamp(timestamp))
+    try:
+        return int(utc_offset.total_seconds())
+    except AttributeError:
+        # total_seconds does not exist in Python 2.6
+        return utc_offset.seconds + utc_offset.days * 24 * 3600
+
+
+def datetime2utcdatetime(dtm):
+    """
+    Returns the given datetime in UTC. dtm is expected to be in local
+    timezone.
+    """
+    offset = tz_offset(timestamp=datetime2timestamp(dtm))
+    delta = datetime.timedelta(seconds=offset)
+    return dtm - delta
 
 
 _UNITS = ['']
@@ -1365,12 +1470,37 @@ def printable(string):
     return "".join(c if ' ' <= c <= '~' else '.' for c in string)
 
 
-def parse_ssh_key(data):
+def _parse_ssh_key(data):
     """Generates SSH key elements"""
     while data:
         length = struct.unpack('>I', data[:4])[0]
         yield data[4:4 + length]
         data = data[4 + length:]
+
+
+def parse_ssh_key(data):
+    info = dict((hashtype, hashlib.new(hashtype, data).hexdigest())
+                for hashtype in ['md5', 'sha1', 'sha256'])
+    parsed = _parse_ssh_key(data)
+    keytype = info["algo"] = next(parsed).decode()
+    if keytype == "ssh-rsa":
+        try:
+            info["exponent"], info["modulus"] = (int(encode_hex(elt), 16)
+                                                 for elt in parsed)
+        except Exception:
+            LOGGER.info("Cannot parse SSH host key from data %r", data,
+                        exc_info=True)
+        else:
+            info["bits"] = math.ceil(math.log(info["modulus"], 2))
+            # convert integer to strings to prevent overflow errors
+            # (e.g., "MongoDB can only handle up to 8-byte ints")
+            for val in ["exponent", "modulus"]:
+                info[val] = str(info[val])
+    elif keytype == 'ecdsa-sha2-nistp256':
+        info['bits'] = 256
+    elif keytype == 'ssh-ed25519':
+        info['bits'] = len(next(data)) * 8
+    return info
 
 
 # https://www.iana.org/assignments/ipv6-address-space/ipv6-address-space.xhtml
@@ -1405,7 +1535,7 @@ _ADDR_TYPES = [
     "Discard (RTBH)",
     "Reserved",
     None,
-    "Protocol assignements",
+    "Protocol assignments",
     None,
     "Documentation",
     None,
@@ -1692,3 +1822,35 @@ have nothing to do here.
 
         """
         return value
+
+
+def ptr2addr(ptr):
+    """
+    Returns the IP address (v4 or v6) represented by the given PTR,
+    None if the string does not seem to be a PTR
+    """
+    if ptr.endswith(".in-addr.arpa"):
+        return '.'.join(reversed(ptr.split(".")[:4]))
+    if ptr.endswith(".ip6.arpa"):
+        return int2ip6(int(ptr[:-9].replace('.', '')[::-1], 16))
+    return None
+
+
+def is_ptr(ptr):
+    """
+    Check whether the given string is a PTR
+    """
+    return ptr.endswith(".in-addr.arpa") or ptr.endswith(".ip6.arpa")
+
+
+def deep_sort_dict_list(elt):
+    """
+    Deep sort the list values inside a dictionary.
+    elt must be a dictionary
+    Notice: It does not sort nested lists.
+    """
+    for value in viewvalues(elt):
+        if isinstance(value, list):
+            value.sort()
+        elif isinstance(value, dict):
+            deep_sort_dict_list(value)

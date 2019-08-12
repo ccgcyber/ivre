@@ -32,7 +32,6 @@ import stat
 # Default values:
 DB = "mongodb:///ivre"
 DB_DATA = None  # specific: maxmind:///<ivre_share_path>/geoip
-DB_FLOW = "neo4j://neo4j:neo4j@localhost:7474/"
 LOCAL_BATCH_SIZE = 10000
 MONGODB_BATCH_SIZE = 100
 NEO4J_BATCH_SIZE = 1000
@@ -126,7 +125,9 @@ FLOW_TIME = True
 FLOW_TIME_PRECISION = 3600
 # When recording flow times, record the whole range from start_time to end_time
 # This option is experimental and possibly useless in practice
-FLOW_TIME_FULL_RANGE = False
+FLOW_TIME_FULL_RANGE = True
+# Store high level protocols metadata in flows. It may take much more space.
+FLOW_STORE_METADATA = True
 
 IPDATA_URLS = {
     'GeoLite2-City.tar.gz':
@@ -226,6 +227,7 @@ def guess_prefix(directory=None):
                 return candidate
         except OSError:
             pass
+        return None
     if __file__.startswith('/'):
         path = '/'
         # absolute path
@@ -239,6 +241,7 @@ def guess_prefix(directory=None):
         candidate = check_candidate(path, directory=directory)
         if candidate is not None:
             return candidate
+    return None
 
 
 def guess_share(soft):
@@ -247,6 +250,7 @@ def guess_share(soft):
                  '/usr/share/%s' % soft]:
         if os.path.isdir(path):
             return path
+    return None
 
 
 if GEOIP_PATH is None:

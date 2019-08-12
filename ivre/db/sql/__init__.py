@@ -219,7 +219,7 @@ class SQLDB(DB):
 
     def __init__(self, url):
         super(SQLDB, self).__init__()
-        self.dburl = url
+        self.dburl = url.geturl()
 
     @property
     def db(self):
@@ -343,8 +343,7 @@ class SQLDB(DB):
         ts = ts - (ts % config.FLOW_TIME_PRECISION)
         if isinstance(date, datetime.datetime):
             return datetime.datetime.fromtimestamp(ts)
-        else:
-            return ts
+        return ts
 
     @staticmethod
     def fmt_results(fields, result):
@@ -361,7 +360,7 @@ class SQLDB(DB):
         if isinstance(oid, (int, basestring)):
             oid = [int(oid)]
         else:
-            oid = [int(oid) for oid in oid]
+            oid = [int(suboid) for suboid in oid]
         return cls._searchobjectid(oid, neg=neg)
 
     @staticmethod
@@ -721,14 +720,16 @@ class SQLDBActive(SQLDB, DBActive):
         """
         failed = 0
         if (version or 0) < 9:
-            failed += self.__migrate_schema_8_9()
+            failed += self._migrate_schema_8_9()
         if (version or 0) < 10:
-            failed += self.__migrate_schema_9_10()
+            failed += self._migrate_schema_9_10()
         if (version or 0) < 11:
-            failed += self.__migrate_schema_10_11()
+            failed += self._migrate_schema_10_11()
+        if (version or 0) < 12:
+            failed += self._migrate_schema_11_12()
         return failed
 
-    def __migrate_schema_8_9(self):
+    def _migrate_schema_8_9(self):
         """Converts records from version 8 to version 9. Version 9 creates a
 structured output for http-headers script.
 
@@ -771,7 +772,7 @@ structured output for http-headers script.
         )
         return len(failed)
 
-    def __migrate_schema_9_10(self):
+    def _migrate_schema_9_10(self):
         """Converts a record from version 9 to version 10. Version 10 changes
 the field names of the structured output for s7-info script.
 
@@ -809,12 +810,56 @@ the field names of the structured output for s7-info script.
         )
         return len(failed)
 
-    def __migrate_schema_10_11(self):
+    def _migrate_schema_10_11(self):
         """Converts a record from version 10 to version 11. Version 11 changes
 the way IP addresses are stored.
 
         """
         raise NotImplementedError
+
+    def _migrate_schema_11_12(self):
+        """Converts a record from version 11 to version 12. Version 12 changes
+the structured output for fcrdns and rpcinfo script.
+
+        """
+        failed = set()
+        req = (select([self.tables.scan.id,
+                       self.tables.script.name,
+                       self.tables.script.port,
+                       self.tables.script.output,
+                       self.tables.script.data])
+               .select_from(join(join(self.tables.scan, self.tables.port),
+                                 self.tables.script))
+               .where(and_(self.tables.scan.schema_version == 11,
+                           self.tables.script.name.in_(["fcrdns",
+                                                        "rpcinfo"]))))
+        for rec in self.db.execute(req):
+            if rec.name in rec.data:
+                migr_func = {
+                    'fcrdns': xmlnmap.change_fcrdns_migrate,
+                    'rpcinfo': xmlnmap.change_rpcinfo,
+                }[rec.name]
+                try:
+                    data = migr_func(rec.data[rec.name])
+                except Exception:
+                    utils.LOGGER.warning("Cannot migrate host %r", rec.id,
+                                         exc_info=True)
+                    failed.add(rec.id)
+                else:
+                    if data:
+                        self.db.execute(
+                            update(self.tables.script)
+                            .where(and_(self.tables.script.port == rec.port,
+                                        self.tables.script.name == rec.name))
+                            .values(data={rec.name: data})
+                        )
+        self.db.execute(
+            update(self.tables.scan)
+            .where(and_(self.tables.scan.schema_version == 11,
+                        self.tables.scan.id.notin_(failed)))
+            .values(schema_version=12)
+        )
+        return len(failed)
 
     def count(self, flt, **_):
         return self.db.execute(
@@ -1424,10 +1469,9 @@ the way IP addresses are stored.
                 return cls.base_filter(
                     port=[(True, cls.tables.port.id.in_(base2))]
                 )
-            else:
-                req = cls.tables.script.data.op('@>')(json.dumps(
-                    {"ls": {"volumes": [{"files": [{"filename": fname}]}]}}
-                ))
+            req = cls.tables.script.data.op('@>')(json.dumps(
+                {"ls": {"volumes": [{"files": [{"filename": fname}]}]}}
+            ))
         if scripts is None:
             return cls.base_filter(script=[(True, req)])
         if isinstance(scripts, basestring):
@@ -1963,10 +2007,9 @@ passive table."""
         if not yieldall:
             req = req.order_by(*(nullsfirst(fld) for fld in fields))
             return self.db.execute(req)
-        else:
-            # results will be modified, we cannot keep a RowProxy
-            # instance, so we convert the results to lists
-            return (list(rec) for rec in self.db.execute(req))
+        # results will be modified, we cannot keep a RowProxy
+        # instance, so we convert the results to lists
+        return (list(rec) for rec in self.db.execute(req))
 
     @classmethod
     def searchnonexistent(cls):
@@ -2042,22 +2085,27 @@ passive table."""
         return PassiveFilter(main=(cls.tables.passive.recontype == rectype))
 
     @classmethod
-    def searchdns(cls, name, reverse=False, subdomains=False):
-        if isinstance(name, list):
-            if len(name) == 1:
-                name = name[0]
-            else:
-                return cls._flt_or(*(cls._searchdns(domain,
-                                                    reverse,
-                                                    subdomains)
-                                     for domain in name))
-        return cls._searchdns(name, reverse, subdomains)
+    def searchdns(cls, name=None, reverse=False, dnstype=None,
+                  subdomains=False):
+        if name is not None:
+            if isinstance(name, list):
+                if len(name) == 1:
+                    name = name[0]
+                else:
+                    return cls._flt_or(*(cls._searchdns(name=domain,
+                                                        reverse=reverse,
+                                                        dnstype=dnstype,
+                                                        subdomains=subdomains)
+                                         for domain in name))
+        return cls._searchdns(name=name, reverse=reverse, dnstype=dnstype,
+                              subdomains=subdomains)
 
     @classmethod
-    def _searchdns(cls, name, reverse=False, subdomains=False):
-        return PassiveFilter(main=(
-            (cls.tables.passive.recontype == 'DNS_ANSWER') &
-            (
+    def _searchdns(cls, name=None, reverse=False, dnstype=None,
+                   subdomains=False):
+        cnd = cls.tables.passive.recontype == 'DNS_ANSWER'
+        if name is not None:
+            cnd &= (
                 (cls.tables.passive.moreinfo['domaintarget'
                                              if reverse else
                                              'domain'].has_key(name))
@@ -2067,7 +2115,9 @@ passive table."""
                                      if reverse else
                                      cls.tables.passive.value, name)
             )
-        ))
+        if dnstype is not None:
+            cnd &= cls.tables.passive.source.op('~')('^%s-' % dnstype.upper())
+        return PassiveFilter(main=cnd)
 
     @classmethod
     def searchuseragent(cls, useragent=None, neg=False):
@@ -2323,9 +2373,9 @@ passive table."""
         )
 
     @classmethod
-    def searchtimeago(cls, delta, neg=False, new=False):
-        field = cls.tables.passive.lastseen if new else \
-            cls.tables.passive.firstseen
+    def searchtimeago(cls, delta, neg=False, new=True):
+        field = cls.tables.passive.firstseen if new else \
+            cls.tables.passive.lastseen
         if not isinstance(delta, datetime.timedelta):
             delta = datetime.timedelta(seconds=delta)
         now = datetime.datetime.now()
@@ -2334,9 +2384,9 @@ passive table."""
                                    field >= timestamp))
 
     @classmethod
-    def searchnewer(cls, timestamp, neg=False, new=False):
-        field = cls.tables.passive.lastseen if new else \
-            cls.tables.passive.firstseen
+    def searchnewer(cls, timestamp, neg=False, new=True):
+        field = cls.tables.passive.firstseen if new else \
+            cls.tables.passive.lastseen
         timestamp = utils.all2datetime(timestamp)
         return PassiveFilter(main=(field <= timestamp if neg else
                                    field > timestamp))

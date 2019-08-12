@@ -62,7 +62,7 @@ class MaxMindFileIter(object):
             next_node_no = self.base.read_record(node_no, flag)
             if next_node_no == 0:
                 raise Exception('Invalid file format')
-            elif next_node_no >= self.base.node_count:
+            if next_node_no >= self.base.node_count:
                 pos = (next_node_no - self.base.node_count -
                        self.base.DATA_SECTION_SEPARATOR_SIZE)
                 curvalinf = int(''.join(str(p) for p in self.current) +
@@ -79,6 +79,8 @@ class MaxMindFileIter(object):
                 return (curvalinf, curvalsup,
                         self.base.decode(pos, self.base.data_section_start)[1])
             node_no = next_node_no
+        # We should never reach this point if the file is properly formatted.
+        raise StopIteration()
 
 
 class EmptyMaxMindFile(object):
@@ -249,12 +251,11 @@ class MaxMindFile(object):
             next_node_no = self.read_record(node_no, flag)
             if next_node_no == 0:
                 raise Exception('Invalid file format')
-            elif next_node_no >= self.node_count:
+            if next_node_no >= self.node_count:
                 pos = (next_node_no - self.node_count -
                        self.DATA_SECTION_SEPARATOR_SIZE)
                 return self.decode(pos, self.data_section_start)[1]
-            else:
-                node_no = next_node_no
+            node_no = next_node_no
         raise Exception('Invalid file format')
 
     def __iter__(self):
@@ -285,7 +286,10 @@ class MaxMindFile(object):
 
     def _get_ranges(self, fields):
         gen = iter(self)
-        start, stop, rec = next(gen)
+        try:
+            start, stop, rec = next(gen)
+        except StopIteration:
+            return
         rec = tuple(self._get_fields(rec, fields))
         for n_start, n_stop, n_rec in gen:
             n_rec = tuple(self._get_fields(n_rec, fields))
@@ -335,8 +339,8 @@ class MaxMindDBData(DBData):
             self._db_country = EmptyMaxMindFile("Country")
             return self._db_country
 
-    def __init__(self, basepath):
-        self.basepath = basepath
+    def __init__(self, url):
+        self.basepath = url.path
         self.reload_files()
 
     def reload_files(self):
@@ -402,6 +406,7 @@ class MaxMindDBData(DBData):
             result['coordinates_accuracy_radius'] = value
         if result:
             return result
+        return None
 
     def country_byip(self, addr):
         result = {}

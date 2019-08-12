@@ -36,14 +36,14 @@ def _extract_passive_HTTP_CLIENT_HEADER_SERVER(rec):
     }]}
     # TODO: (?) handle Host: header for DNS
     # FIXME: catches ip addresses as domain name.
-    if 'source' in rec and rec['source'] == 'HOST':
-        values = rec['value'].split(".")
-        domains = [values.pop()]
-        while values:
-            domains.insert(0, values.pop() + "." + domains[0])
-        return {'hostnames': [{'domains': domains,
-                               'type': "?",
-                               'name': domains[0]}]}
+    # if 'source' in rec and rec['source'] == 'HOST':
+    #     values = rec['value'].split(".")
+    #     domains = [values.pop()]
+    #     while values:
+    #         domains.insert(0, values.pop() + "." + domains[0])
+    #     return {'hostnames': [{'domains': domains,
+    #                            'type': "?",
+    #                            'name': domains[0]}]}
 
 
 def _extract_passive_HTTP_SERVER_HEADER(rec):
@@ -259,7 +259,7 @@ def passive_record_to_view(rec):
     """
     rec = dict(rec)
     if not rec.get('addr'):
-        return
+        return None
     outrec = {
         'addr': rec["addr"],
         'state_reason': 'passive',
@@ -311,7 +311,7 @@ def from_passive(flt):
     """Iterator over passive results, by address."""
     records = passive_to_view(flt)
     cur_addr = None
-    cur_rec = None
+    cur_rec = {}
     for rec in records:
         if cur_addr is None:
             cur_addr = rec['addr']
@@ -328,7 +328,7 @@ def from_passive(flt):
             cur_addr = rec['addr']
         else:
             cur_rec = db.view.merge_host_docs(cur_rec, rec)
-    if cur_rec is not None:
+    if cur_rec:
         yield cur_rec
 
 
@@ -397,7 +397,11 @@ def to_view(itrs):
             i += 1
     next_addrs = [rec['addr'] for rec in next_recs]
     cur_rec = None
-    cur_addr = min(next_addrs, key=utils.ip2int)
+    try:
+        cur_addr = min(next_addrs, key=utils.ip2int)
+    except ValueError:
+        # next_addrs is empty
+        cur_addr = None
     while next_recs:
         # We cannot use a `for i in range(len(itrs))` loop because
         # itrs is modified in the loop.

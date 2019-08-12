@@ -1,5 +1,5 @@
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -25,5 +25,4 @@ RUN apt-get -qy install python python-dev python-pip && \
     pip install ivre && \
     apt-get -qy autoremove python-dev python-pip
 
-# Config
-COPY ivre.conf /etc/ivre.conf
+RUN echo 'DB = "mongodb://ivredb/"' > /etc/ivre.conf

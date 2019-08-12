@@ -110,7 +110,7 @@ def extend_binary_expression(element, compiler, **kwargs):
         if opstring == '?':
             return compiler.process(func.HAS_KEY(element.left, element.right))
     # FIXME: Variant base type Comparator seems to be used here.
-    if element.operator == json_getitem_op:
+    if element.operator is json_getitem_op:
         return compiler.process(func.ACCESS(element.left, element.right))
     return compiler.visit_binary(element)
 
@@ -178,7 +178,7 @@ class DefaultINET(UserDefinedType):
     python_type = bytes
 
     def __init__(self):
-        self.__visit_name__ = "DefaultINET"
+        self.__visit_name__ = "VARCHAR(32)"
 
     def get_col_spec(self):
         return self.__visit_name__
@@ -398,6 +398,7 @@ class N_Script(Base, _Script):
         ForeignKeyConstraint(['port'], ['n_port.id'], ondelete='CASCADE'),
         Index('ix_n_script_data', 'data', postgresql_using='gin'),
         Index('ix_n_script_name', 'name'),
+        Index('ix_n_script_port_name', 'port', 'name', unique=True),
     )
 
 
@@ -475,6 +476,7 @@ class V_Script(Base, _Script):
         ForeignKeyConstraint(['port'], ['v_port.id'], ondelete='CASCADE'),
         Index('ix_v_script_data', 'data', postgresql_using='gin'),
         Index('ix_v_script_name', 'name'),
+        Index('ix_v_script_port_name', 'port', 'name', unique=True),
     )
 
 
