@@ -40,9 +40,6 @@ from ivre.db.sql import PassiveCSVFile, ScanCSVFile, SQLDB, SQLDBActive, \
 
 class PostgresDB(SQLDB):
 
-    def __init__(self, url):
-        super(PostgresDB, self).__init__(url)
-
     @staticmethod
     def ip2internal(addr):
         return utils.force_int2ip(addr)
@@ -119,8 +116,8 @@ class BulkInsert(object):
     def commit(self, query=None, renew=True):
         if query is None:
             last = len(self.queries) - 1
-            for i, query in enumerate(list(self.queries)):
-                self.commit(query=query, renew=True if i < last else renew)
+            for i, q_query in enumerate(list(self.queries)):
+                self.commit(query=q_query, renew=True if i < last else renew)
             return
         q_query, params = self.queries.pop(query)
         self.conn.execute(q_query, *params)
@@ -145,15 +142,10 @@ class BulkInsert(object):
 
 
 class PostgresDBFlow(PostgresDB, SQLDBFlow):
-
-    def __init__(self, url):
-        super(PostgresDBFlow, self).__init__(url)
+    pass
 
 
 class PostgresDBActive(PostgresDB, SQLDBActive):
-
-    def __init__(self, url):
-        super(PostgresDBActive, self).__init__(url)
 
     def _migrate_schema_10_11(self):
         """Converts a record from version 10 to version 11.
@@ -1005,9 +997,6 @@ insert structures.
 
 class PostgresDBNmap(PostgresDBActive, SQLDBNmap):
 
-    def __init__(self, url):
-        super(PostgresDBNmap, self).__init__(url)
-
     def store_scan_doc(self, scan):
         scan = scan.copy()
         if 'start' in scan:
@@ -1032,6 +1021,19 @@ class PostgresDBNmap(PostgresDBActive, SQLDBNmap):
             utils.LOGGER.debug("SCAN STORED: %r", utils.encode_hex(scanfileid))
         else:
             self.db.execute(insrt)
+
+    def update_scan_doc(self, scan_id, data):
+        data = data.copy()
+        if 'end' in data:
+            data['end'] = datetime.datetime.utcfromtimestamp(
+                int(data['end'])
+            )
+        self.db.execute(
+            update(self.tables.scanfile)
+            .where(self.tables.scanfile.sha256 == utils.decode_hex(scan_id))
+            .values(**dict((key, data[key]) for key in ['end', 'elapsed']
+                           if key in data))
+        )
 
     def _store_host(self, host):
         addr = self.ip2internal(host['addr'])
@@ -1150,9 +1152,6 @@ class PostgresDBNmap(PostgresDBActive, SQLDBNmap):
 
 
 class PostgresDBView(PostgresDBActive, SQLDBView):
-
-    def __init__(self, url):
-        super(PostgresDBView, self).__init__(url)
 
     def _store_host(self, host):
         addr = self.ip2internal(host['addr'])

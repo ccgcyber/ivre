@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -52,7 +52,7 @@ from pymongo.errors import BulkWriteError
 import pymongo
 
 from ivre.db import DB, DBActive, DBNmap, DBPassive, DBAgent, DBView, DBFlow, \
-    LockError
+    DBFlowMeta, LockError
 from ivre import config, passive, utils, xmlnmap, flow
 
 
@@ -89,13 +89,19 @@ MongoDB < 3.2.
     return {'$concat': result}
 
 
+def log_pipeline(pipeline):
+    """Simple function to log (when config.DEBUG_DB is set) a MongoDB
+pipeline for the aggregation framework.
+
+    """
+    utils.LOGGER.debug("DB: MongoDB aggregation pipeline: %r", pipeline)
+
+
 class MongoDB(DB):
 
     schema_migrations_indexes = []
     schema_latest_versions = []
     hint_indexes = []
-    needunwind = []
-    ipaddr_fields = []
     no_limit = 0
 
     def __init__(self, url):
@@ -111,6 +117,7 @@ class MongoDB(DB):
             else:
                 username = unquote(username)
                 if username == 'GSSAPI':
+                    # pylint: disable=import-outside-toplevel
                     import krbV
                     self.username = (krbV.default_context().default_ccache()
                                      .principal().name)
@@ -301,6 +308,15 @@ e.g.  .explain()) based on the column and a filter.
         return json.dumps(cursor.explain(), indent=indent,
                           default=self.serialize)
 
+    def init(self):
+        """Initializes the column(s), i.e., drops the column(s) and creates
+the default indexes.
+
+        """
+        for colname in self.columns:
+            self.db[colname].drop()
+        self.create_indexes()
+
     def create_indexes(self):
         for colnum, indexes in enumerate(self.indexes):
             colname = self.columns[colnum]
@@ -469,7 +485,7 @@ want to do something special here, e.g., mix with other records.
         # mongodb-aggregation-framework-nested-arrays-subtract-expression>
         for i in range(field.count('.'), -1, -1):
             subfield = field.rsplit('.', i)[0]
-            if subfield in self.needunwind:
+            if subfield in self.list_fields:
                 pipeline += [{"$unwind": "$" + subfield}]
         pipeline += specialflt
         # next step for previous hack
@@ -513,7 +529,7 @@ want to do something special here, e.g., mix with other records.
         # mongodb-aggregation-framework-nested-arrays-subtract-expression>
         for i in range(field.count('.'), -1, -1):
             subfield = field.rsplit('.', i)[0]
-            if subfield in self.needunwind:
+            if subfield in self.list_fields:
                 pipeline += [{"$unwind": "$" + subfield}]
         if is_ipfield:
             if self.mongodb_32_more:
@@ -537,18 +553,20 @@ want to do something special here, e.g., mix with other records.
 
         """
         is_ipfield = field in self.ipaddr_fields
+        pipeline = self._distinct_pipeline(field, flt=flt, sort=sort,
+                                           limit=limit, skip=skip,
+                                           is_ipfield=is_ipfield)
+        log_pipeline(pipeline)
         cursor = self.set_limits(
-            self.db[column].aggregate(
-                self._distinct_pipeline(field, flt=flt, sort=sort, limit=limit,
-                                        skip=skip, is_ipfield=is_ipfield),
-                cursor={}
-            )
+            self.db[column].aggregate(pipeline, cursor={})
         )
         if is_ipfield:
             if self.mongodb_32_more:
-                return (None if res['_id'][0] is None else res['_id']
+                return (None if res['_id'][0] is None
+                        else self.internal2ip(res['_id'])
                         for res in cursor)
-            return ([int(val) for val in res] if res[0] else None
+            return (self.internal2ip([int(val) for val in res])
+                    if res[0] else None
                     for res in (res['_id'].split('###') for res in cursor))
         return (res['_id'] for res in cursor)
 
@@ -588,11 +606,13 @@ want to do something special here, e.g., mix with other records.
                 pipeline.append(
                     {'$sort': OrderedDict([("_id", 1)])}
                 )
+            log_pipeline(pipeline)
             for rec in self.db[
                     self.columns[self._features_column]
             ].aggregate(pipeline, cursor={}):
                 yield rec['_id']
         else:
+            log_pipeline(pipeline)
             for rec in self.db[
                     self.columns[self._features_column]
             ].aggregate(pipeline, cursor={}):
@@ -660,6 +680,9 @@ want to do something special here, e.g., mix with other records.
     @staticmethod
     def flt_or(*args):
         return {'$or': args} if len(args) > 1 else args[0]
+
+    def _search_field_exists(self, field):
+        return {field: {"$exists": True}}
 
     @staticmethod
     def searchnonexistent():
@@ -776,42 +799,6 @@ want to do something special here, e.g., mix with other records.
 
 class MongoDBActive(MongoDB, DBActive):
 
-    ipaddr_fields = ["addr", "traces.hops.ipaddr", "state_reason_ip"]
-    needunwind = [
-        "categories",
-        "cpes",
-        "os.osclass",
-        "os.osmatch",
-        "ports",
-        "ports.screenwords",
-        "ports.scripts",
-        "ports.scripts.fcrdns",
-        "ports.scripts.fcrdns.addresses",
-        "ports.scripts.http-headers",
-        "ports.scripts.http-user-agent",
-        "ports.scripts.ike-info.transforms",
-        "ports.scripts.ike-info.vendor_ids",
-        "ports.scripts.ls.volumes",
-        "ports.scripts.ls.volumes.files",
-        "ports.scripts.mongodb-databases.databases",
-        "ports.scripts.mongodb-databases.databases.shards",
-        "ports.scripts.rpcinfo",
-        "ports.scripts.rpcinfo.version",
-        "ports.scripts.smb-enum-shares.shares",
-        "ports.scripts.ssh-hostkey",
-        "ports.scripts.ssl-ja3-client",
-        "ports.scripts.ssl-ja3-server",
-        "ports.scripts.vulns",
-        "ports.scripts.vulns.check_results",
-        "ports.scripts.vulns.description",
-        "ports.scripts.vulns.extra_info",
-        "ports.scripts.vulns.ids",
-        "ports.scripts.vulns.refs",
-        "traces",
-        "traces.hops",
-        "hostnames",
-        "hostnames.domains",
-    ]
     column_hosts = 0
     _features_column = 0
     indexes = [
@@ -844,6 +831,12 @@ class MongoDBActive(MongoDB, DBActive):
              {"sparse": True}),
             ([('ports.scripts.ls.volumes.files.filename',
                pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('ports.scripts.ssl-cert.md5', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('ports.scripts.ssl-cert.sha1', pymongo.ASCENDING)],
+             {"sparse": True}),
+            ([('ports.scripts.ssl-cert.sha256', pymongo.ASCENDING)],
              {"sparse": True}),
             ([
                 ('ports.scripts.vulns.id', pymongo.ASCENDING),
@@ -958,14 +951,11 @@ class MongoDBActive(MongoDB, DBActive):
                 9: (10, self.migrate_schema_hosts_9_10),
                 10: (11, self.migrate_schema_hosts_10_11),
                 11: (12, self.migrate_schema_hosts_11_12),
+                12: (13, self.migrate_schema_hosts_12_13),
+                13: (14, self.migrate_schema_hosts_13_14),
+                14: (15, self.migrate_schema_hosts_14_15),
             },
         ]
-
-    def init(self):
-        """Initializes the "active" columns, i.e., drops those columns and
-creates the default indexes."""
-        self.db[self.columns[self.column_hosts]].drop()
-        self.create_indexes()
 
     def cmp_schema_version_host(self, host):
         """Returns 0 if the `host`'s schema version matches the code's
@@ -1351,6 +1341,87 @@ the structured output for fcrdns and rpcinfo script.
             update["$set"]["ports"] = doc['ports']
         return update
 
+    @staticmethod
+    def migrate_schema_hosts_12_13(doc):
+        """Converts a record from version 12 to version 13. Version 13 changes
+        the structured output for ms-sql-info and smb-enum-shares scripts.
+
+        """
+        assert doc["schema_version"] == 12
+        update = {"$set": {"schema_version": 13}}
+        updated = False
+        for port in doc.get('ports', []):
+            for script in port.get('scripts', []):
+                if script['id'] == "ms-sql-info":
+                    if "ms-sql-info" in script:
+                        script[
+                            "ms-sql-info"
+                        ] = xmlnmap.change_ms_sql_info(
+                            script["ms-sql-info"]
+                        )
+                        updated = True
+                elif script['id'] == "smb-enum-shares":
+                    if "smb-enum-shares" in script:
+                        script[
+                            "smb-enum-shares"
+                        ] = xmlnmap.change_smb_enum_shares(
+                            script["smb-enum-shares"]
+                        )
+                        updated = True
+        if updated:
+            update["$set"]["ports"] = doc['ports']
+        return update
+
+    @staticmethod
+    def migrate_schema_hosts_13_14(doc):
+        """Converts a record from version 13 to version 14. Version 14 changes
+the structured output for ssh-hostkey and ls scripts to prevent a same
+field from having different data types.
+
+        """
+        assert doc["schema_version"] == 13
+        update = {"$set": {"schema_version": 14}}
+        updated = False
+        for port in doc.get('ports', []):
+            for script in port.get('scripts', []):
+                if script['id'] == "ssh-hostkey" and 'ssh-hostkey' in script:
+                    script['ssh-hostkey'] = xmlnmap.change_ssh_hostkey(
+                        script["ssh-hostkey"]
+                    )
+                    updated = True
+                elif (xmlnmap.ALIASES_TABLE_ELEMS.get(script['id']) == 'ls' and
+                      "ls" in script):
+                    script[
+                        "ls"
+                    ] = xmlnmap.change_ls_migrate(
+                        script["ls"]
+                    )
+                    updated = True
+        if updated:
+            update["$set"]["ports"] = doc['ports']
+        return update
+
+    @staticmethod
+    def migrate_schema_hosts_14_15(doc):
+        """Converts a record from version 14 to version 15. Version 15 changes
+the structured output for httpègit script to move data to values
+instead of keys.
+
+        """
+        assert doc["schema_version"] == 14
+        update = {"$set": {"schema_version": 15}}
+        updated = False
+        for port in doc.get('ports', []):
+            for script in port.get('scripts', []):
+                if script['id'] == "http-git" and 'http-git' in script:
+                    script['http-git'] = xmlnmap.change_ssh_hostkey(
+                        script["http-git"]
+                    )
+                    updated = True
+        if updated:
+            update["$set"]["ports"] = doc['ports']
+        return update
+
     def _get(self, flt, **kargs):
         """Like .get(), but returns a MongoDB cursor (suitable for use with
 e.g.  .explain()).
@@ -1458,12 +1529,12 @@ it is not expected)."""
                             p.get('port') == port and
                             p.get('protocol') == protocol)
         updated = False
-        for port in host.get('ports', []):
-            if not flt_cond(port):
+        for portdoc in host.get('ports', []):
+            if not flt_cond(portdoc):
                 continue
-            screenwords = utils.screenwords(self.getscreenshot(port))
+            screenwords = utils.screenwords(self.getscreenshot(portdoc))
             if screenwords is not None:
-                port['screenwords'] = screenwords
+                portdoc['screenwords'] = screenwords
                 updated = True
         if updated:
             self.db[self.columns[self.column_hosts]].update(
@@ -1496,6 +1567,7 @@ it is not expected)."""
             {"$project": {"_id": 0, "coords": "$infos.loc.coordinates"}},
             {"$group": {"_id": "$coords", "count": {"$sum": 1}}},
         ]
+        log_pipeline(pipeline)
         return ({'_id': tuple(rec['_id'][::-1]), 'count': rec['count']}
                 for rec in col.aggregate(pipeline, cursor={}))
 
@@ -1585,8 +1657,8 @@ it is not expected)."""
         return rec
 
     def remove(self, host):
-        """Removes the host "view" from the active column.
-        "view" must be the record as returned by MongoDB.
+        """Removes the host from the active column. `host` must be the record
+        as returned by `.get()`.
 
         """
         self.db[self.columns[self.column_hosts]].remove(spec_or_id=host['_id'])
@@ -1640,6 +1712,7 @@ it is not expected)."""
                           "id": "$_id",
                           "mean": {"$multiply": ["$count", "$ports"]}}},
         ]
+        log_pipeline(aggr)
         return self.db[self.columns[self.column_hosts]].aggregate(aggr,
                                                                   cursor={})
 
@@ -1670,6 +1743,7 @@ it is not expected)."""
             {"$group": {"_id": "$ports",
                         "ids": {"$addToSet": "$_id"}}},
         ]
+        log_pipeline(aggr)
         return self.db[self.columns[self.column_hosts]].aggregate(aggr,
                                                                   cursor={})
 
@@ -1916,20 +1990,20 @@ it is not expected)."""
 
         """
         req = {}
-        if name:
+        if name is not None:
             req['id'] = name
         if output is not None:
             req['output'] = output
         if values is not None:
-            if name is None:
+            if not isinstance(name, basestring):
                 raise TypeError(".searchscript() needs a `name` arg "
                                 "when using a `values` arg")
+            key = xmlnmap.ALIASES_TABLE_ELEMS.get(name, name)
             if isinstance(values, (basestring, utils.REGEXP_T)):
-                req[xmlnmap.ALIASES_TABLE_ELEMS.get(name, name)] = values
+                req[key] = values
             else:
                 for field, value in viewitems(values):
-                    req["%s.%s" % (xmlnmap.ALIASES_TABLE_ELEMS.get(name, name),
-                                   field)] = value
+                    req["%s.%s" % (key, field)] = value
         if not req:
             return {"ports.scripts": {"$exists": not neg}}
         if len(req) == 1:
@@ -1940,13 +2014,6 @@ it is not expected)."""
         if neg:
             return {"ports.scripts": {"$not": {"$elemMatch": req}}}
         return {"ports.scripts": {"$elemMatch": req}}
-
-    @classmethod
-    def searchcert(cls, keytype=None):
-        if keytype is None:
-            return cls.searchscript(name="ssl-cert")
-        return cls.searchscript(name="ssl-cert",
-                                values={'pubkey.type': keytype})
 
     @staticmethod
     def searchsvchostname(hostname):
@@ -2357,8 +2424,8 @@ it is not expected)."""
         elif field == "addr":
             specialproj = {
                 "_id": 0,
-                '$addr_0': 1,
-                '$addr_1': 1,
+                'addr_0': 1,
+                'addr_1': 1,
             }
             if self.mongodb_32_more:
                 specialflt = [{"$project": {field: ['$addr_0', '$addr_1']}}]
@@ -2531,9 +2598,9 @@ it is not expected)."""
 
             def outputproc(x):
                 return {'count': x['count'],
-                        '_id': x['_id'] if x['_id'] else None}
+                        '_id': null_if_empty(x['_id'])}
         elif field.startswith("service:"):
-            port = int(field.split(':', 1)[1])
+            port = int(field[8:])
             flt = self.flt_and(flt, self.searchport(port))
             specialproj = {"_id": 0, "ports.port": 1, "ports.service_name": 1}
             specialflt = [
@@ -2578,12 +2645,12 @@ it is not expected)."""
                 def outputproc(x):
                     return {
                         'count': x['count'],
-                        '_id': tuple(elt if elt else None for elt in
+                        '_id': tuple(null_if_empty(elt) for elt in
                                      x['_id'].split('###')),
                     }
             field = "ports.service_product"
         elif field.startswith('product:'):
-            service = field.split(':', 1)[1]
+            service = field[8:]
             if service.isdigit():
                 port = int(service)
                 flt = self.flt_and(flt, self.searchport(port))
@@ -2625,7 +2692,7 @@ it is not expected)."""
                 def outputproc(x):
                     return {
                         'count': x['count'],
-                        '_id': tuple(elt if elt else None for elt in
+                        '_id': tuple(null_if_empty(elt) for elt in
                                      x['_id'].split('###')),
                     }
             field = "ports.service_product"
@@ -2668,12 +2735,12 @@ it is not expected)."""
                 def outputproc(x):
                     return {
                         'count': x['count'],
-                        '_id': tuple(elt if elt else None for elt in
+                        '_id': tuple(null_if_empty(elt) for elt in
                                      x['_id'].split('###')),
                     }
             field = "ports.service_product"
         elif field.startswith('version:'):
-            service = field.split(':', 1)[1]
+            service = field[8:]
             if service.isdigit():
                 port = int(service)
                 flt = self.flt_and(flt, self.searchport(port))
@@ -2730,7 +2797,7 @@ it is not expected)."""
                 def outputproc(x):
                     return {
                         'count': x['count'],
-                        '_id': tuple(elt if elt else None for elt in
+                        '_id': tuple(null_if_empty(elt) for elt in
                                      x['_id'].split('###')),
                     }
             field = "ports.service_product"
@@ -2765,8 +2832,8 @@ it is not expected)."""
             # *and* for our filter
             fields = fields[:max(fields.index(field), len(cpeflt2)) + 1]
             flt = self.flt_and(flt, cpeflt1)
-            specialproj = dict(("cpes.%s" % fname, 1) for fname in fields)
-            specialproj["_id"] = 0
+            specialproj = dict((("cpes.%s" % fname, 1) for fname in fields),
+                               _id=0)
             concat = ["$cpes.%s" % fields[0]]
             # Now we only keep what the user wanted
             for fname in fields[1:fields.index(field) + 1]:
@@ -2841,8 +2908,7 @@ it is not expected)."""
             aggrflt = {
                 "field": re.compile('^([^\\.]+\\.){%d}[^\\.]+$' % level)}
         elif field.startswith('cert.'):
-            subfield = field[5:]
-            field = 'ports.scripts.ssl-cert.' + subfield
+            field = 'ports.scripts.ssl-cert.' + field[5:]
         elif field == 'useragent' or field.startswith('useragent:'):
             if field == 'useragent':
                 flt = self.flt_and(flt, self.searchuseragent())
@@ -2981,8 +3047,7 @@ it is not expected)."""
             field = "ports.scripts.ssh-hostkey.bits"
         elif field.startswith('sshkey.'):
             flt = self.flt_and(flt, self.searchsshkey())
-            subfield = field[7:]
-            field = 'ports.scripts.ssh-hostkey.' + subfield
+            field = 'ports.scripts.ssh-hostkey.' + field[7:]
         elif field == 'ike.vendor_ids':
             flt = self.flt_and(flt, self.searchscript(name="ike-info"))
             specialproj = {"ports.scripts.ike-info.vendor_ids.value": 1,
@@ -3115,22 +3180,23 @@ it is not expected)."""
             flt = self.flt_and(flt, self.searchscript(name="http-headers"))
             field = "ports.scripts.http-headers.%s" % field[8:]
         elif field.startswith('httphdr:'):
-            flt = self.flt_and(flt, self.searchscript(name="http-headers"))
+            subfield = field[8:].lower()
+            flt = self.flt_and(flt,
+                               self.searchscript(name="http-headers",
+                                                 values={"name": subfield}))
             specialproj = {"_id": 0, "ports.scripts.http-headers.name": 1,
                            "ports.scripts.http-headers.value": 1}
             specialflt = [
                 {"$match": {"ports.scripts.http-headers.name":
-                            field[8:].lower()}}
+                            subfield}}
             ]
             field = "ports.scripts.http-headers.value"
         elif field.startswith('modbus.'):
             flt = self.flt_and(flt, self.searchscript(name="modbus-discover"))
-            subfield = field[7:]
-            field = 'ports.scripts.modbus-discover.' + subfield
+            field = 'ports.scripts.modbus-discover.' + field[7:]
         elif field.startswith('s7.'):
             flt = self.flt_and(flt, self.searchscript(name="s7-info"))
-            subfield = field[3:]
-            field = 'ports.scripts.s7-info.' + subfield
+            field = 'ports.scripts.s7-info.' + field[3:]
         elif field.startswith('enip.'):
             flt = self.flt_and(flt, self.searchscript(name="enip-info"))
             subfield = field[5:]
@@ -3221,7 +3287,7 @@ it is not expected)."""
 
             def outputproc(x):
                 return {'count': x['count'],
-                        '_id': x['_id'] if x['_id'] else None}
+                        '_id': null_if_empty(x['_id'])}
         elif field == 'screenwords':
             field = 'ports.screenwords'
             flt = self.flt_and(flt, self.searchscreenshot(words=True))
@@ -3300,6 +3366,7 @@ it is not expected)."""
             skip=skip, least=least, aggrflt=aggrflt,
             specialproj=specialproj, specialflt=specialflt,
         )
+        log_pipeline(pipeline)
         cursor = self.set_limits(
             self.db[self.columns[self.column_hosts]].aggregate(pipeline,
                                                                cursor={})
@@ -3326,71 +3393,6 @@ it is not expected)."""
             '$ports.port',
             '$ports'
         )
-
-    def _features_port_get(self, features, flt, yieldall, use_service,
-                           use_product, use_version):
-        if use_version:
-            def _extract(rec):
-                for port in rec.get('ports', []):
-                    if port['port'] == -1:
-                        continue
-                    yield (port['port'], port.get('service_name'),
-                           port.get('service_product'),
-                           port.get('service_version'))
-                    if not yieldall:
-                        continue
-                    if port.get('service_version') is not None:
-                        yield (port['port'], port.get('service_name'),
-                               port.get('service_product'), None)
-                    else:
-                        continue
-                    if port.get('service_product') is not None:
-                        yield (port['port'], port.get('service_name'), None,
-                               None)
-                    else:
-                        continue
-                    if port.get('service_name') is not None:
-                        yield (port['port'], None, None, None)
-        elif use_product:
-            def _extract(rec):
-                for port in rec.get('ports', []):
-                    if port['port'] == -1:
-                        continue
-                    yield (port['port'], port.get('service_name'),
-                           port.get('service_product'))
-                    if not yieldall:
-                        continue
-                    if port.get('service_product') is not None:
-                        yield (port['port'], port.get('service_name'), None)
-                    else:
-                        continue
-                    if port.get('service_name') is not None:
-                        yield (port['port'], None, None)
-        elif use_service:
-            def _extract(rec):
-                for port in rec.get('ports', []):
-                    if port['port'] == -1:
-                        continue
-                    yield (port['port'], port.get('service_name'))
-                    if not yieldall:
-                        continue
-                    if port.get('service_name') is not None:
-                        yield (port['port'], None)
-        else:
-            def _extract(rec):
-                for port in rec.get('ports', []):
-                    if port['port'] == -1:
-                        continue
-                    yield (port['port'], )
-        n_features = len(features)
-        for rec in self.get(flt):
-            currec = [0] * n_features
-            for feat in _extract(rec):
-                try:
-                    currec[features[feat]] = 1
-                except KeyError:
-                    pass
-            yield (rec['addr'], currec)
 
     def diff_categories(self, category1, category2, flt=None,
                         include_both_open=True):
@@ -3432,6 +3434,8 @@ it is not expected)."""
                                 "port": "$ports.port"},
                         "categories": {"$push": "$categories"}}},
         ]
+        log_pipeline(pipeline)
+
         cursor = self.db[self.columns[self.column_hosts]].aggregate(
             pipeline, cursor={}
         )
@@ -3455,13 +3459,13 @@ it is not expected)."""
 class MongoDBNmap(MongoDBActive, DBNmap):
 
     column_scans = 1
+    content_handler = Nmap2Mongo
 
     def __init__(self, url):
         super(MongoDBNmap, self).__init__(url)
         self.columns = [self.params.pop('colname_hosts', 'hosts'),
                         self.params.pop('colname_scans', 'scans')]
         self.schema_migrations.append({})  # scans
-        self.content_handler = Nmap2Mongo
         self.output_function = None
 
     def store_scan_doc(self, scan):
@@ -3470,12 +3474,15 @@ class MongoDBNmap(MongoDBActive, DBNmap):
                            self.columns[self.column_scans])
         return ident
 
+    def update_scan_doc(self, scan_id, data):
+        self.db[self.columns[self.column_scans]].update(
+            {'_id': scan_id},
+            {"set": data},
+            multi=False,
+        )
+
     def store_or_merge_host(self, host):
         self.store_host(host)
-
-    def init(self):
-        self.db[self.columns[self.column_scans]].drop()
-        super(MongoDBNmap, self).init()
 
     def cmp_schema_version_scan(self, scan):
         """Returns 0 if the `scan`'s schema version matches the code's
@@ -3495,12 +3502,12 @@ class MongoDBNmap(MongoDBActive, DBNmap):
         return False
 
     def remove(self, host):
-        """Removes the host "host" from the active column.
-        "host" must be the host record as returned by MongoDB.
+        """Removes the host from the active column. `host` must be the host
+record as returned by `.get()`.
 
-        If "host" has a "scanid" attribute, and if it refers to a scan
-        that have no more host record after the deletion of "host",
-        then the scan record is also removed.
+If `host` has a `scanid` attribute, and if it refers to a scan that
+have no more host record after the deletion of `host`, then the scan
+record is also removed.
 
         """
         super(MongoDBNmap, self).remove(host)
@@ -3525,8 +3532,6 @@ class MongoDBView(MongoDBActive, DBView):
 
 class MongoDBPassive(MongoDB, DBPassive):
 
-    needunwind = ["infos.san"]
-    ipaddr_fields = ["addr"]
     column_passive = 0
     _features_column = 0
     indexes = [
@@ -3634,12 +3639,6 @@ class MongoDBPassive(MongoDB, DBPassive):
                 None: (1, self.migrate_schema_passive_0_1),
             },
         ]
-
-    def init(self):
-        """Initializes the "passive" columns, i.e., drops the columns, and
-creates the default indexes."""
-        self.db[self.columns[self.column_passive]].drop()
-        self.create_indexes()
 
     def cmp_schema_version_passive(self, rec):
         """Returns 0 if the `rec`'s schema version matches the code's
@@ -3792,7 +3791,7 @@ setting values according to the keyword arguments.
         # so, we replace the value with its SHA1 hash and store the
         # original value in full[original column name].
         for key in ['value', 'targetval']:
-            if len(spec.get(key, "")) > utils.MAXVALLEN:
+            if len(spec.get(key) or "") > utils.MAXVALLEN:
                 spec['full' + key] = spec[key]
                 value = spec[key]
                 if not isinstance(value, bytes):
@@ -4057,6 +4056,7 @@ setting values according to the keyword arguments.
                 }
         pipeline = self._topvalues(field, flt=flt, specialproj=specialproj,
                                    **kargs)
+        log_pipeline(pipeline)
         cursor = self.set_limits(
             self.db[self.columns[self.column_passive]].aggregate(
                 pipeline, cursor={},
@@ -4081,63 +4081,6 @@ setting values according to the keyword arguments.
             '$port',
             '$infos',
         )
-
-    def _features_port_get(self, features, flt, yieldall, use_service,
-                           use_product, use_version):
-        curaddr = None
-        currec = None
-        if use_version:
-            def _extract(rec):
-                info = rec.get('infos', {})
-                yield (rec['port'], info.get('service_name'),
-                       info.get('service_product'),
-                       info.get('service_version'))
-                if not yieldall:
-                    return
-                if info.get('service_version') is not None:
-                    yield (rec['port'], info.get('service_name'),
-                           info.get('service_product'), None)
-                if info.get('service_product') is not None:
-                    yield (rec['port'], info.get('service_name'), None, None)
-                if info.get('service_name') is not None:
-                    yield (rec['port'], None, None, None)
-        elif use_product:
-            def _extract(rec):
-                info = rec.get('infos', {})
-                yield (rec['port'], info.get('service_name'),
-                       info.get('service_product'))
-                if not yieldall:
-                    return
-                if info.get('service_product') is not None:
-                    yield (rec['port'], info.get('service_name'), None)
-                if info.get('service_name') is not None:
-                    yield (rec['port'], None, None)
-        elif use_service:
-            def _extract(rec):
-                info = rec.get('infos', {})
-                yield (rec['port'], info.get('service_name'))
-                if not yieldall:
-                    return
-                if info.get('service_name') is not None:
-                    yield (rec['port'], None)
-        else:
-            def _extract(rec):
-                yield (rec['port'], )
-        n_features = len(features)
-        for rec in self.get(self.flt_and(flt, {'port': {'$exists': True}}),
-                            sort=[('addr', 1)]):
-            # the addr aggregation could (should?) be done with an
-            # aggregation framework pipeline
-            if curaddr != rec['addr']:
-                if curaddr is not None:
-                    yield (curaddr, currec)
-                curaddr = rec['addr']
-                currec = [0] * n_features
-            for feat in _extract(rec):
-                # We could use += rec['count'] instead here
-                currec[features[feat]] = 1
-        if curaddr is not None:
-            yield (curaddr, currec)
 
     @staticmethod
     def searchrecontype(rectype):
@@ -4200,6 +4143,21 @@ setting values according to the keyword arguments.
     def searchsvchostname(hostname):
         return {'infos.service_hostname': hostname}
 
+    @classmethod
+    def searchmac(cls, mac=None, neg=False):
+        res = {'recontype': 'MAC_ADDRESS'}
+        if mac is not None:
+            if neg:
+                if isinstance(mac, utils.REGEXP_T):
+                    res['value'] = {"$not": mac}
+                else:
+                    res['value'] = {"$ne": mac}
+            else:
+                res['value'] = mac
+        elif neg:
+            return {'recontype': {'$not': 'MAC_ADDRESS'}}
+        return res
+
     @staticmethod
     def searchuseragent(useragent=None, neg=False):
         if neg:
@@ -4236,13 +4194,18 @@ setting values according to the keyword arguments.
         return res
 
     @staticmethod
-    def searchcert(keytype=None):
-        if keytype is None:
-            return {'recontype': 'SSL_SERVER',
-                    'source': 'cert'}
-        return {'recontype': 'SSL_SERVER',
-                'source': 'cert',
-                'infos.pubkeyalgo': keytype + 'Encryption'}
+    def searchcert(keytype=None, md5=None, sha1=None, sha256=None):
+        res = {'recontype': 'SSL_SERVER',
+               'source': 'cert'}
+        if keytype is not None:
+            res['infos.pubkeyalgo'] = keytype + 'Encryption'
+        if md5 is not None:
+            res['infos.md5'] = md5
+        if sha1 is not None:
+            res['infos.sha1'] = sha1
+        if sha256 is not None:
+            res['infos.sha256'] = sha256
+        return res
 
     @classmethod
     def _searchja3(cls, value_or_hash):
@@ -4369,23 +4332,6 @@ class MongoDBAgent(MongoDB, DBAgent):
         self.columns = [self.params.pop('colname_agents', 'agents'),
                         self.params.pop('colname_scans', 'runningscans'),
                         self.params.pop('colname_masters', 'masters')]
-
-    def init(self):
-        """Initializes the "agent" columns, i.e., drops those columns
-        and creates the default indexes.
-
-        """
-        self.db[self.columns[self.column_agents]].drop()
-        self.db[self.columns[self.column_scans]].drop()
-        self.db[self.columns[self.column_masters]].drop()
-        self.create_indexes()
-
-    def stop_agent(self, agentid):
-        agent = self.get_agent(agentid)
-        if agent is None:
-            raise IndexError("Agent not found [%r]" % agentid)
-        if agent['scan'] is not None:
-            self.unassign_agent(agent['_id'])
 
     def _add_agent(self, agent):
         return self.db[self.columns[self.column_agents]].insert(agent)
@@ -4539,53 +4485,13 @@ scan object on success, and raises a LockError on failure.
                               fields=["_id"])))
 
 
-class MongoDBFlowMeta(type):
-    """
-    This metaclass aims to compute 'meta_desc' and 'needunwind' once for all
-    instances of MongoDBFlow.
-    """
-    def __new__(cls, name, bases, attrs):
-        attrs['meta_desc'] = MongoDBFlowMeta.compute_meta_desc()
-        attrs['needunwind'] = MongoDBFlowMeta.compute_needunwind(
-            attrs['meta_desc'])
-        return type.__new__(cls, name, bases, attrs)
-
-    @staticmethod
-    def compute_meta_desc():
-        """
-        Computes meta_desc from flow.META_DESC
-        meta_desc is a "usable" version of flow.META_DESC. It is computed only
-        once at class initialization.
-        """
-        meta_desc = {}
-        for proto, configs in viewitems(flow.META_DESC):
-            meta_desc[proto] = {}
-            for kind, values in viewitems(configs):
-                meta_desc[proto][kind] = (
-                    utils.normalize_props(values, braces=False)
-                )
-        return meta_desc
-
-    @staticmethod
-    def compute_needunwind(meta_desc):
-        """
-        Computes needunwind from meta_desc.
-        """
-        needunwind = ['sports', 'codes']
-        for proto, kinds in viewitems(meta_desc):
-            for kind, values in viewitems(kinds):
-                if kind == 'keys':
-                    for name in values:
-                        needunwind.append('meta.%s.%s' % (proto, name))
-        return needunwind
-
-
-class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
+class MongoDBFlow(with_metaclass(DBFlowMeta, MongoDB, DBFlow)):
     column_flow = 0
 
     datefields = [
         'firstseen',
-        'lastseen'
+        'lastseen',
+        'times.start',
     ]
 
     # This represents the kinds of metadata that are defined in flow.META_DESC
@@ -4668,19 +4574,10 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                     "$each": cls._get_timeslots(
                         rec['start_time'], rec['end_time'])}
             else:
-                d = OrderedDict()
-                d['start'] = cls.date_round(rec['start_time'])
-                d['duration'] = config.FLOW_TIME_PRECISION
-
-                updatespec.setdefault("$addToSet", {})["times"] = d
-
-    @classmethod
-    def dns2flow(cls, bulk, rec):
-        """
-        Takes a parsed dns.log line entry and adds it to insert bulk.
-        It must be a separate method because of neo4j compatibility.
-        """
-        return cls.any2flow(bulk, 'dns', rec)
+                updatespec.setdefault("$addToSet", {})["times"] = (
+                    cls._get_timeslot(rec['start_time'],
+                                      config.FLOW_TIME_PRECISION,
+                                      config.FLOW_TIME_BASE))
 
     @classmethod
     def any2flow(cls, bulk, name, rec):
@@ -4794,14 +4691,7 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
             # Raised when executing an empty bulk
             pass
 
-    def init(self):
-        """Initializes the "flows" columns, i.e., drops those columns and
-        creates the default indexes.
-        """
-        self.db[self.columns[self.column_flow]].drop()
-        self.create_indexes()
-
-    def get(self, flt, skip=None, limit=None, orderby=None):
+    def get(self, flt, skip=None, limit=None, orderby=None, fields=None):
         """
         Returns an iterator over flows honoring the given filter
         with the given options.
@@ -4821,7 +4711,7 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                 "Unsupported orderby (should be 'src', 'dst' or 'flow')")
         for f in self._get_cursor(self.columns[self.column_flow], flt,
                                   limit=(limit or 0), skip=(skip or 0),
-                                  sort=sort):
+                                  sort=sort, fields=fields):
             try:
                 f['src_addr'] = self.internal2ip([f.pop('src_addr_0'),
                                                   f.pop('src_addr_1')])
@@ -4840,7 +4730,7 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
         destinations = 0
         flows = self.db[self.columns[self.column_flow]].count(flt)
         if flows > 0:
-            sources = self.db[self.columns[self.column_flow]].aggregate([
+            pipeline = [
                 {'$match': flt},
                 {
                     '$group': {
@@ -4857,9 +4747,13 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                     '_id': None,
                     'count': {'$sum': 1}
                 }}
-            ]).next()['count']
+            ]
+            log_pipeline(pipeline)
+            sources = next(
+                self.db[self.columns[self.column_flow]].aggregate(pipeline)
+            )['count']
 
-            destinations = self.db[self.columns[self.column_flow]].aggregate([
+            pipeline = [
                 {'$match': flt},
                 {
                     '$group': {
@@ -4873,8 +4767,11 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                     '_id': None,
                     'count': {'$sum': 1}
                 }}
-            ]).next()['count']
-
+            ]
+            log_pipeline(pipeline)
+            destinations = next(
+                self.db[self.columns[self.column_flow]].aggregate(pipeline)
+            )['count']
         return {'clients': sources, 'servers': destinations, 'flows': flows}
 
     def topvalues(self, flt, fields, collect_fields=None, sum_fields=None,
@@ -4890,10 +4787,10 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
             {
                 fields: (field_1_value, field_2_value, ...),
                 count: count,
-                collected: [
+                collected: (
                     (collect_1_value, collect_2_value, ...),
                     ...
-                ]
+                )
             }
         Collected fields are unique.
         """
@@ -4906,9 +4803,22 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
         special_fields = {'src.addr': ['src_addr_0', 'src_addr_1'],
                           'dst.addr': ['dst_addr_0', 'dst_addr_1'],
                           'sport': ['sports']}
+
+        # Validate fields
+        for fields_list in (fields, collect_fields, sum_fields):
+            for f in fields_list:
+                # special fields can be shortcuts (ex: sport) and are not
+                # necessary valid fields
+                if f not in special_fields:
+                    flow.validate_field(f)
+
         # special fields that are not addresses will be translated again at
         # the end
         reverse_special_fields = {'sports': 'sport'}
+        # special fields that have been translated
+        # necessary to accept both already transformed and non transformed
+        # field
+        reversed_special_fields = set()
 
         # Compute the internal fields
         # internal_fields = [aggr fields, collect_fields, sum_fields]
@@ -4918,6 +4828,8 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
             for field in external_fields[i]:
                 if field in special_fields:
                     internal_fields[i].extend(special_fields[field])
+                    for t_field in special_fields[field]:
+                        reversed_special_fields.add(t_field)
                 else:
                     internal_fields[i].append(field)
 
@@ -4942,7 +4854,7 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
         for field in internal_fields_set:
             for i in range(field.count('.'), -1, -1):
                 subfield = field.rsplit('.', i)[0]
-                if subfield in self.needunwind:
+                if subfield in self.list_fields:
                     pipeline += [{"$unwind": "$" + subfield}]
 
         # It is important to match the query after the unwind stages
@@ -4997,6 +4909,7 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
         if topnbr is not None:
             pipeline.append({"$limit": topnbr})
 
+        log_pipeline(pipeline)
         res = self.db[self.columns[self.column_flow]].aggregate(pipeline,
                                                                 cursor={})
         for entry in res:
@@ -5032,14 +4945,14 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                     ]
                     del ext_entry[addr0]
                     del ext_entry[addr1]
-            # reverse special fields
+            # reverse special fields which have been reversed
             for key in list(ext_entry):
-                if key in reverse_special_fields:
+                if key in reversed_special_fields:
                     ext_entry[reverse_special_fields[key]] = ext_entry.pop(key)
             for key in list(ext_entry['_id']):
-                if key in reverse_special_fields:
+                if key in reversed_special_fields:
                     ext_entry['_id'][reverse_special_fields[key]] = \
-                        ext_entry['id'].pop(key)
+                        ext_entry['_id'].pop(key)
             # Format fields in a tuple ordered accordingly to fields argument
             res_fields_dict = ext_entry.pop('_id')
             res_fields = tuple(res_fields_dict.get(key) for key in fields)
@@ -5047,194 +4960,22 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
             res_count = ext_entry.pop('_count')
             # Format collected results in a set of tuples to avoid duplicates
             if ext_entry:
+                # Transforms collected list fields in tuples
+                for key in ext_entry:
+                    ext_entry[key] = [elt if not isinstance(elt, list)
+                                      else tuple(elt)
+                                      for elt in ext_entry[key]]
                 # This keeps the order of collected fields
                 res_collected = set(zip(*(ext_entry[key]
                                           for key in collect_fields)))
+            else:
+                res_collected = set()
+
             yield {
                 'fields': res_fields,
                 'collected': res_collected,
                 'count': res_count
             }
-
-    @staticmethod
-    def _flow2host(row, prefix):
-        """
-        Returns a dict which represents one of the two host of the given flow.
-        prefix should be 'dst' or 'src' to get the source or the destination
-        host.
-        """
-        res = {}
-        if prefix == 'src':
-            res['addr'] = row.get('src_addr')
-        elif prefix == 'dst':
-            res['addr'] = row.get('dst_addr')
-        else:
-            raise Exception("prefix must be 'dst' or 'src'")
-        res['firstseen'] = row.get('firstseen')
-        res['lastseen'] = row.get('lastseen')
-        return res
-
-    @staticmethod
-    def _node2json(row):
-        """
-        Returns a dict representing a node in graph output.
-        row must be the representation of an host, see _flow2host.
-        """
-        return {
-            "id": row.get('addr'),
-            "label": row.get('addr'),
-            "labels": ["Host"],
-            "x": random.random(),
-            "y": random.random(),
-            "data": row
-        }
-
-    @staticmethod
-    def _edge2json_default(row, timeline=False):
-        """
-        Returns a dict representing an edge in default graph output.
-        row must be a flow entry.
-        """
-        label = (row.get('proto') + '/' + str(row.get('dport'))
-                 if row.get('proto') in ['tcp', 'udp']
-                 else row.get('proto') + '/' + str(row.get('type')))
-        res = {
-            "id": str(row.get('_id')),
-            "label": label,
-            "labels": ["Flow"],
-            "source": row.get('src_addr'),
-            "target": row.get('dst_addr'),
-            "data": {
-                "cspkts": row.get('cspkts'),
-                "csbytes": row.get('csbytes'),
-                "count": row.get('count'),
-                "scpkts": row.get('scpkts'),
-                "scbytes": row.get('scbytes'),
-                "proto": row.get('proto'),
-                "firstseen": row.get('firstseen'),
-                "lastseen": row.get('lastseen'),
-                "__key__": str(row.get('_id')),
-                "addr_src": row.get('src_addr'),
-                "addr_dst": row.get('dst_addr')
-            }
-        }
-        if timeline and row.get('times'):
-            res["data"]["meta"] = {
-                "times": [t.get('start') for t in row.get('times')]
-            }
-        if row.get('proto') in ['tcp', 'udp']:
-            res['data']["sports"] = row.get('sports')
-            res['data']["dport"] = row.get('dport')
-        elif row.get('proto') == 'icmp':
-            res['data']['codes'] = row.get('codes')
-            res['data']['type'] = row.get('type')
-        return res
-
-    @staticmethod
-    def _edge2json_flow_map(row):
-        """
-        Returns a dict representing an edge in flow map graph output.
-        row must be a flow entry.
-        """
-        flow = ()
-        if row.get('proto') in ['udp', 'tcp']:
-            flow = (row.get('proto'), row.get('dport'))
-        else:
-            flow = (row.get('proto'), None)
-        res = {
-            "id": str(row.get('_id')),
-            "label": "MERGED_FLOWS",
-            "labels": ["MERGED_FLOWS"],
-            "source": row.get('src_addr'),
-            "target": row.get('dst_addr'),
-            "data": {
-                "count": 1,
-                "flows": [flow]
-            }
-        }
-        return res
-
-    @staticmethod
-    def _edge2json_talk_map(row):
-        """
-        Returns a dict representing an edge in talk map graph output.
-        row must be a flow entry.
-        """
-        res = {
-            "id": str(row.get('_id')),
-            "label": "TALK",
-            "labels": ["TALK"],
-            "source": row.get('src_addr'),
-            "target": row.get('dst_addr'),
-            "data": {
-                "count": 1,
-                "flows": ["TALK"]
-            }
-        }
-        return res
-
-    @classmethod
-    def cursor2json_iter(cls, cursor, mode=None, timeline=False):
-        """
-        Takes a MongoDB cursor on flows collection and for each entry
-        yield a dict {src: src_node, dst: dst_node, flow: flow_edge}.
-        """
-        random.seed()
-        for row in cursor:
-            src_node = cls._node2json(cls._flow2host(row, 'src'))
-            dst_node = cls._node2json(cls._flow2host(row, 'dst'))
-            flow_node = []
-            if mode == "flow_map":
-                flow_node = cls._edge2json_flow_map(row)
-            elif mode == "talk_map":
-                flow_node = cls._edge2json_talk_map(row)
-            else:
-                flow_node = cls._edge2json_default(row, timeline=timeline)
-            yield {"src": src_node, "dst": dst_node, "flow": flow_node}
-
-    @classmethod
-    def cursor2json_graph(cls, cursor, mode, timeline):
-        """
-        Returns a dict {"nodes": [], "edges": []} representing the output
-        graph.
-        Nodes are unique hosts. Edges are flows, formatted according to the
-        given mode.
-        """
-        g = {"nodes": [], "edges": []}
-        # Store unique hosts
-        hosts = {}
-        # Store tuples (source, dest) for flow and talk map modes.
-        edges = {}
-        for row in cls.cursor2json_iter(cursor, mode=mode, timeline=timeline):
-            if mode in ["flow_map", "talk_map"]:
-                flw = row["flow"]
-                # If this edge already exists
-                if (flw["source"], flw["target"]) in edges:
-                    edge = edges[(flw["source"], flw["target"])]
-                    if mode == "flow_map":
-                        # In flow map mode, store flows data in each edge
-                        flows = flw["data"]["flows"]
-                        if flows[0] not in edge["data"]["flows"]:
-                            edge["data"]["flows"].append(flows[0])
-                            edge["data"]["count"] += 1
-                else:
-                    edges[(flw["source"], flw["target"])] = flw
-            else:
-                g["edges"].append(row["flow"])
-            for host in (row["src"], row["dst"]):
-                if host["id"] in hosts:
-                    hosts[host["id"]]["data"]["firstseen"] = min(
-                        hosts[host["id"]]["data"]["firstseen"],
-                        host["data"]["firstseen"])
-                    hosts[host["id"]]["data"]["lastseen"] = max(
-                        hosts[host["id"]]["data"]["lastseen"],
-                        host["data"]["lastseen"])
-                else:
-                    hosts[host["id"]] = host
-        g["nodes"] = hosts.values()
-        if mode in ["flow_map", "talk_map"]:
-            g["edges"] = edges.values()
-        return g
 
     @classmethod
     def search_flow_net(cls, net, neg=False, fieldname=''):
@@ -5290,20 +5031,20 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
         return flt
 
     @classmethod
-    def get_longest_array_attr(cls, attr):
-        """
-        Returns (longest array attribute, remaining attributes) where the
+    def _get_longest_array_attr(cls, attr):
+        """Returns (longest array attribute, remaining attributes) where the
         longest array attribute is the longest attribute stored in
-        cls.needunwind which matches the given attr. Two attributes match
-        each other if they share the same root.
-        If no array attribute can be found, returns (None, attr)
-        Example: a.b.c matches with a.b.c, a.b and a
-        If cls.needunwind = ['a', 'a.b'], then get_longest_array_attr('a.b.c')
-        returns ('a.b', 'c').
+        cls.list_fields which matches the given attr. Two attributes
+        match each other if they share the same root. If no array
+        attribute can be found, returns (None, attr) Example: a.b.c
+        matches with a.b.c, a.b and a If cls.list_fields = ['a',
+        'a.b'], then _get_longest_array_attr('a.b.c') returns ('a.b',
+        'c').
+
         """
         for i in range(attr.count('.') + 1):
             subfield = attr.rsplit('.', i)
-            if subfield[0] in cls.needunwind:
+            if subfield[0] in cls.list_fields:
                 return (subfield[0], '.'.join(subfield[1:]))
         return (None, attr)
 
@@ -5412,7 +5153,7 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                 # values (in other words when array values are dictionaries),
                 # we must use $elemMatch on the array attribute.
                 attr = clause['attr']
-                array_attr, value_attr = cls.get_longest_array_attr(
+                array_attr, value_attr = cls._get_longest_array_attr(
                     clause['attr'])
                 if array_attr is None:
                     raise ValueError("%s is not a valid array attribute"
@@ -5495,37 +5236,28 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
 
     @classmethod
     def from_filters(cls, filters, limit=None, skip=0, orderby="", mode=None,
-                     timeline=False):
+                     timeline=False, after=None, before=None, precision=None):
         """
         Overloads from_filters method from MongoDB.
         It transforms flow.Query object returned by super().from_filters
         in MongoDB filter and returns it.
+        Note: limit, skip, orderby, mode, timeline are IGNORED. They are
+        present only for compatibility reasons.
         """
         query = (super(MongoDBFlow, cls)
                  .from_filters(filters, limit=limit, skip=skip,
                                orderby=orderby, mode=mode, timeline=timeline))
-        return cls.flt_from_query(query)
-
-    def to_graph(self, flt, limit=None, skip=None, orderby=None, mode=None,
-                 timeline=False):
-        """
-        Returns a dict {"nodes": [], "edges": []}.
-        """
-        return self.cursor2json_graph(
-            self.get(flt, skip, limit, orderby),
-            mode,
-            timeline)
-
-    def to_iter(self, flt, limit=None, skip=None, orderby=None, mode=None,
-                timeline=False):
-        """
-        Returns an iterator which yields dict {"src": src, "dst": dst,
-        "flow": flow}.
-        """
-        return self.cursor2json_iter(
-            self.get(flt, skip, limit, orderby),
-            mode=mode,
-            timeline=timeline)
+        flt = cls.flt_from_query(query)
+        times_filter = {}
+        if after:
+            times_filter.setdefault('start', {})['$gte'] = after
+        if before:
+            times_filter.setdefault('start', {})['$lt'] = before
+        if precision:
+            times_filter['duration'] = precision
+        if times_filter:
+            flt = cls.flt_and(flt, {'times': {'$elemMatch': times_filter}})
+        return flt
 
     def host_details(self, addr):
         """
@@ -5593,11 +5325,7 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
             g['meta'] = row.get('meta')
         return g
 
-    def cleanup_flows(self):
-        # TODO Add cleanup steps like in neo4j
-        pass
-
-    def flow_daily(self, flt=None):
+    def flow_daily(self, precision, flt, after=None, before=None):
         """
         Returns a generator within each element is a dict
         {
@@ -5612,6 +5340,17 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
 
         # Unwind timeslots
         pipeline.append({'$unwind': '$times'})
+
+        match = {}
+        # Keep only timeslots with the given precision
+        match['times.duration'] = precision
+        # We need to ensure after and before filters after $unwind
+        if after:
+            match.setdefault('times.start', {})['$gte'] = after
+        if before:
+            match.setdefault('times.start', {})['$lt'] = before
+
+        pipeline.append({'$match': match})
 
         # Project time in hours, minutes, seconds
         pipeline.append({
@@ -5649,6 +5388,7 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
             '_id.second': 1
         }})
 
+        log_pipeline(pipeline)
         res = self.db[self.columns[self.column_flow]].aggregate(pipeline,
                                                                 cursor={})
 
@@ -5656,17 +5396,221 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
             flows = {}
             for fields in entry['fields']:
                 if fields.get('proto') in ['tcp', 'udp']:
-                    number = fields.get('dport')
+                    entry_name = '%(proto)s/%(dport)d' % fields
+                elif fields.get('type') is not None:
+                    entry_name = '%(proto)s/%(type)d' % fields
                 else:
-                    number = fields.get('type')
-                entry_name = "%s/%s" % (fields.get('proto'), number)
+                    entry_name = fields['proto']
                 flows.setdefault(entry_name, 0)
                 flows[entry_name] += 1
             res = {
-                'flows': [(name, count) for name, count in viewitems(flows)],
+                'flows': list(viewitems(flows)),
                 'time_in_day': datetime.time(
                     hour=entry['_id']['hour'],
                     minute=entry['_id']['minute'],
                     second=entry['_id']['second'])
             }
             yield res
+
+    def reduce_precision(self, new_precision, flt=None,
+                         before=None, after=None, current_precision=None):
+        base = config.FLOW_TIME_BASE
+
+        new_duration = new_precision
+        current_duration = current_precision
+        if current_duration is not None:
+            if base % current_duration != 0:
+                raise ValueError("Base %d must be a multiple of current "
+                                 "precision." % config.FLOW_TIME_BASE)
+            base %= new_duration
+            # validate new duration
+            if new_duration <= current_duration:
+                raise ValueError("New precision value must be greater than "
+                                 "current one.")
+            if new_duration % current_duration != 0:
+                raise ValueError("New precision must be a multiple of current "
+                                 "precision.")
+
+        # Create the update bulk
+        bulk = self.db[
+            self.columns[self.column_flow]
+        ].initialize_unordered_bulk_op()
+
+        if flt is None:
+            flt = self.flt_empty
+
+        for flw in self._get_cursor(self.columns[self.column_flow], flt):
+            # We must ensure the unicity of timeslots in a flow
+            new_times = set()
+            for timeslot in flw["times"]:
+                # This timeslot may not need to be changed
+                if ((current_duration is not None and
+                     timeslot['duration'] != current_duration) or
+                        (current_duration is None and (
+                         new_duration <= timeslot['duration'] or
+                         new_duration % timeslot['duration'] != 0 or
+                         base % timeslot['duration'] != 0)) or
+                        (before is not None and timeslot['start'] >= before) or
+                        (after is not None and timeslot['start'] < after)):
+                    new_times.add((timeslot["start"], timeslot["duration"]))
+                    continue
+                # Compute new timeslot
+                new_tslt = self._get_timeslot(timeslot['start'],
+                                              new_duration, base)
+                new_times.add((new_tslt["start"], new_tslt["duration"]))
+            # Build a list of timeslot dicts from new timeslots set
+            timeslots = [{"start": timeslot[0], "duration": timeslot[1]}
+                         for timeslot in new_times]
+            bulk.find({"_id": flw["_id"]}).update(
+                {"$set": {"times": timeslots}}
+            )
+        # Execute bulk
+        try:
+            start_time = time.time()
+            result = bulk.execute()
+            newtime = time.time()
+            update_rate = result.get('nModified') / (newtime - start_time)
+            utils.LOGGER.debug("%d updates, %f/sec",
+                               result.get('nModified'), update_rate)
+        except pymongo.errors.InvalidOperation:
+            utils.LOGGER.debug("No operation to execute.")
+
+    def list_precisions(self):
+        pipeline = [
+            {'$unwind': '$times'},
+            {'$group': {'_id': '$times.duration'}},
+            {"$sort": {"_id": 1}}
+        ]
+
+        res = self.db[self.columns[self.column_flow]].aggregate(pipeline,
+                                                                cursor={})
+        for entry in res:
+            yield entry['_id']
+
+    @staticmethod
+    def should_switch_hosts(flw):
+        """
+        Returns True if flow hosts should be switched, False otherwise.
+        """
+        if len(flw['dports']) <= 5:
+            return False
+
+        # Try to avoid reversing scans
+        if flw['_id']['proto'] == 'tcp':
+            ratio = 0
+            divisor = 0
+            if flw['cspkts'] > 0:
+                ratio += flw['csbytes'] / flw['cspkts']
+                divisor += 1
+            if flw['scpkts'] > 0:
+                ratio += flw['scbytes'] / flw['scpkts']
+                divisor += 1
+
+            avg = ratio / divisor
+            if avg < 50:
+                # TCP segments were almost empty, which most of the time
+                # corresponds to an active scan.
+                return False
+
+        return True
+
+    def cleanup_flows(self):
+        """
+        Cleanup flows which source and destination seem to have been switched.
+        """
+        # Get flows which have a unique source port
+        pipeline = [
+            {
+                '$match': {
+                    'sports': {'$size': 1},
+                    'dport': {'$gt': 128},
+                }
+            },
+            {
+                '$unwind': '$sports'
+            },
+            {
+                '$unwind': '$times'
+            },
+            {
+                '$group': {
+                    '_id': {
+                        'src_addr_0': '$src_addr_0',
+                        'src_addr_1': '$src_addr_1',
+                        'dst_addr_0': '$dst_addr_0',
+                        'dst_addr_1': '$dst_addr_1',
+                        'proto': '$proto',
+                        'sport': '$sports'
+                    },
+                    "dports": {'$addToSet': '$dport'},
+                    '_ids': {'$addToSet': '$_id'},
+                    'cspkts': {'$sum': '$cspkts'},
+                    'scpkts': {'$sum': '$scpkts'},
+                    'csbytes': {'$sum': '$csbytes'},
+                    'scbytes': {'$sum': '$scbytes'},
+                    'firstseen': {'$min': '$firstseen'},
+                    'lastseen': {'$max': '$lastseen'},
+                    'count': {'$sum': '$count'},
+                    'times': {'$addToSet': '$times'}
+                }
+            },
+        ]
+        res = self.db[self.columns[self.column_flow]].aggregate(pipeline)
+        bulk = self.start_bulk_insert()
+        counter = 0
+        for rec in res:
+            rec['_id']['src_addr'] = self.internal2ip(
+                [rec['_id']['src_addr_0'], rec['_id']['src_addr_1']]
+            )
+            rec['_id']['dst_addr'] = self.internal2ip(
+                [rec['_id']['dst_addr_0'], rec['_id']['dst_addr_1']]
+            )
+            if self.should_switch_hosts(rec):
+                # new_rec is the new reversed flow
+                new_rec = {}
+                new_rec['src_addr_0'] = rec['_id']['dst_addr_0']
+                new_rec['src_addr_1'] = rec['_id']['dst_addr_1']
+                new_rec['dst_addr_0'] = rec['_id']['src_addr_0']
+                new_rec['dst_addr_1'] = rec['_id']['src_addr_1']
+                new_rec['dport'] = rec['_id']['sport']
+                new_rec['proto'] = rec['_id']['proto']
+                findspec = self._get_flow_key(new_rec)
+
+                # Note that sizes and packet numbers have been switched
+                # between src and dst
+                updatespec = {
+                    '$min': {'firstseen': rec['firstseen']},
+                    '$max': {'lastseen': rec['lastseen']},
+                    '$inc': {
+                        'cspkts': rec['scpkts'],
+                        'scpkts': rec['cspkts'],
+                        'csbytes': rec['scbytes'],
+                        'scbytes': rec['csbytes'],
+                        'count': rec['count']
+                    },
+                    '$addToSet': {'sports': {'$each': rec['dports']}}
+                }
+
+                # Remove old flows
+                removespec = {'_id': {'$in': rec['_ids']}}
+
+                if config.FLOW_TIME:
+                    updatespec["$addToSet"]['times'] = {
+                        '$each': rec['times']
+                    }
+
+                if config.DEBUG:
+                    f_str = "%s (%d) -- %s --> %s (%s)" % (
+                        rec['_id']['src_addr'],
+                        rec['_id']['sport'],
+                        rec['_id']['proto'],
+                        rec['_id']['dst_addr'],
+                        ','.join([str(elt) for elt in rec['dports']]))
+                    utils.LOGGER.debug("Switch flow hosts: %s", f_str)
+
+                bulk.find(findspec).upsert().update(updatespec)
+                bulk.find(removespec).remove()
+                counter += len(rec['_ids'])
+
+        self.bulk_commit(bulk)
+        utils.LOGGER.debug("%d flows switched.", counter)

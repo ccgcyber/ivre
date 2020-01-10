@@ -98,7 +98,8 @@ def displayhost(record, showscripts=True, showtraceroute=True, showos=True,
                               x['port']))
     for port in ports:
         if port.get('port') == -1:
-            record['scripts'] = port['scripts']
+            if 'scripts' in port:
+                record['scripts'] = port['scripts']
             continue
         if 'state_reason' in port:
             reason = " (%s)" % ', '.join(
@@ -130,6 +131,14 @@ def displayhost(record, showscripts=True, showtraceroute=True, showos=True,
         if scripts:
             out.write('\tHost scripts:\n')
             out.writelines(scripts)
+    mac_addrs = record.get('addresses', {}).get('mac')
+    if mac_addrs:
+        for addr in mac_addrs:
+            out.write('\tMAC Address: %s' % addr)
+            manuf = utils.mac2manuf(addr)
+            if manuf and manuf[0]:
+                out.write(' (%s)' % manuf[0])
+            out.write('\n')
     if showtraceroute and record.get('traces'):
         for trace in record['traces']:
             proto = trace['protocol']

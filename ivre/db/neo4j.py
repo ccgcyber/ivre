@@ -22,6 +22,8 @@ databases.
 
 """
 
+# This module should disappear soon
+# pylint: disable=redefined-outer-name
 
 from datetime import datetime, time as dtime
 import operator
@@ -352,6 +354,10 @@ class Neo4jFlowQuery(flow.Query):
             attr = attr[1:]
         else:
             qtype = "@"
+        # Validate field
+        # 'addr' is a shortcut for src.addr OR dst.addr
+        if attr != 'addr':
+            flow.validate_field(attr)
         try:
             # Sorry for the horrendous code -- jalet
             elements, attr = attr.rsplit('.', 1)
@@ -1101,13 +1107,16 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
         else:
             props = elt.get("data", {})
         if meta:
+            for field in ['firstseen', 'lastseen']:
+                if field in props:
+                    props[field] = datetime.fromtimestamp(props[field])
+            props["meta"] = meta
             if 'times' in meta:
                 for (i, t) in enumerate(meta['times']):
-                    meta['times'][i] = datetime.fromtimestamp(t)
-            props["meta"] = meta
-        for field in ['firstseen', 'lastseen']:
-            if field in props:
-                props[field] = datetime.fromtimestamp(props[field])
+                    meta['times'][i] = {
+                        'start': datetime.fromtimestamp(t),
+                        'duration': config.FLOW_TIME_PRECISION
+                    }
         return props
 
     @staticmethod
@@ -1221,34 +1230,53 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
                     for collect in row["collected"]:
                         collect[index] = datetime.fromtimestamp(
                             collect[index])
+            for index, collect in enumerate(row["collected"] or []):
+                for i, elt in enumerate(row["collected"][index] or []):
+                    if isinstance(elt, list):
+                        row["collected"][index][i] = tuple(elt)
+                row["collected"][index] = tuple(row["collected"][index] or [])
             yield {
-                "fields": row["fields"],
+                "fields": tuple(row["fields"]),
                 "count": row["count"],
-                "collected": row["collected"],
+                "collected": tuple(row["collected"] or []),
             }
 
-    def from_filters(self, filters, limit=None, skip=0, orderby="", mode=None,
-                     timeline=False):
-        cypher_query = self._filters2cypher(filters, limit=limit, skip=skip,
-                                            orderby=orderby, mode=mode,
-                                            timeline=timeline)
+    @classmethod
+    def from_filters(cls, filters, limit=None, skip=0, orderby="", mode=None,
+                     timeline=False, after=None, before=None, precision=None):
+        """
+        Note: after, before, precision are IGNORED. They are present only for
+        compatibility reasons.
+        """
+        cypher_query = cls._filters2cypher(filters, limit=limit, skip=skip,
+                                           orderby=orderby, mode=mode,
+                                           timeline=timeline)
         return cypher_query
 
-    def to_graph(self, query, mode=None, limit=None, skip=None, orderby=None,
-                 timeline=False):
+    def to_graph(self, flt, limit=None, skip=None, orderby=None, mode=None,
+                 timeline=False, after=None, before=None):
         """
-        mode, limit, skip, orderby and timeline arguments are unused.
+        Every arguments but flt are unused.
         They are only needed because of API compatibility between flow
         backends.
         """
-        res = self.cursor2json_graph(self.run(query))
-        return res
+        return self.cursor2json_graph(self.run(flt))
 
-    def to_iter(self, query, limit=None, skip=None, orderby=None, mode=None,
-                timeline=False):
-        return self.cursor2json_iter(self.run(query))
+    def to_iter(self, flt, limit=None, skip=None, orderby=None, mode=None,
+                timeline=False, after=None, before=None, precision=None):
+        """
+        Every arguments but flt are unused.
+        They are only needed because of API compatibility between flow
+        backends.
+        """
+        return self.cursor2json_iter(self.run(flt))
 
-    def count(self, query):
+    def count(self, query, after=None, before=None, precision=None):
+        """
+        Note: after, before, precision are unused.
+        They are present because of API compatibility between flow
+        backends.
+        """
         old_limit = query.limit
         old_skip = query.skip
         old_ret = query.ret
@@ -1268,14 +1296,17 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
         query.orderby = old_orderby
         return counts
 
-    def flow_daily(self, query):
-        """Returns a generator within each element is a dict
+    def flow_daily(self, precision, flt, after=None, before=None):
+        """
+        Returns a generator within each element is a dict
         {
             flows: [("proto/dport", count), ...]
             time_in_day: time
         }
-        WARNING/FIXME: this mutates the query
+        WARNING/FIXME: this mutates the query.
+        Note: precision, after, before are IGNORED in neo4j backend.
         """
+        query = flt
         query.add_clause(
             "WITH src.elt as src, link.elt as link, dst.elt as dst\n"
             "MATCH (link)-[:SEEN]->(t:Time)\n"
@@ -1298,6 +1329,12 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
         """
         collect_fields = collect_fields or []
         sumfields = sum_fields or []
+
+        # Validate fields
+        for fields_list in (fields, collect_fields, sum_fields):
+            for f in fields_list:
+                flow.validate_field(f)
+
         original_fields = list(fields)
         collect = list(collect_fields)
         for flist in fields, collect, sumfields:

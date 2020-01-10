@@ -30,7 +30,9 @@ $ python setup.py build
 from distutils.core import setup
 from distutils.command.install_data import install_data
 from distutils.command.install_lib import install_lib
+from distutils.dist import DistributionMetadata
 import os
+from tempfile import TemporaryFile
 
 
 VERSION = __import__('ivre').VERSION
@@ -48,6 +50,12 @@ class smart_install_data(install_data):
             self.data_files = [
                 ("/%s" % path if path.startswith('etc/') else path, files)
                 for path, files in self.data_files
+                if path  # skip README.md or any file with an empty path
+            ]
+        else:
+            self.data_files = [
+                (path, files) for path, files in self.data_files
+                if path  # skip README.md or any file with an empty path
             ]
         return install_data.run(self)
 
@@ -76,6 +84,35 @@ class smart_install_lib(install_lib):
         return result
 
 
+with open(os.path.join(os.path.abspath(os.path.dirname('__file__')),
+                       'README.md')) as fdesc:
+    long_description = fdesc.read()
+long_description_content_type = 'text/markdown'
+
+
+# Monkey patching (distutils does not handle Description-Content-Type
+# from long_description_content_type parameter in setup()).
+_write_pkg_file_orig = DistributionMetadata.write_pkg_file
+
+
+def _write_pkg_file(self, file):
+    with TemporaryFile(mode="w+") as tmpfd:
+        _write_pkg_file_orig(self, tmpfd)
+        tmpfd.seek(0)
+        for line in tmpfd:
+            if line.startswith('Metadata-Version: '):
+                file.write('Metadata-Version: 2.1\n')
+            elif line.startswith('Description: '):
+                file.write('Description-Content-Type: %s; charset=UTF-8\n' %
+                           long_description_content_type)
+                file.write(line)
+            else:
+                file.write(line)
+
+
+DistributionMetadata.write_pkg_file = _write_pkg_file
+
+
 setup(
     name='ivre',
     version=VERSION,
@@ -85,15 +122,10 @@ setup(
     download_url='https://github.com/cea-sec/ivre/tarball/master',
     license='GPLv3+',
     description='Network recon framework',
-    long_description="""
-IVRE is a set of tools aimed at gathering and exploiting network
-information.
-
-It consists of a Python library, a Web UI, CLI tools and several
-specialized scripts.
-""",
+    long_description=long_description,
+    long_description_content_type=long_description_content_type,
     keywords=["network", "network recon", "network cartography",
-              "nmap", "bro", "p0f"],
+              "nmap", "masscan", "zmap", "bro", "zeek", "p0f"],
     classifiers=[
         "Development Status :: 4 - Beta",
         "Environment :: Console",
@@ -109,7 +141,6 @@ specialized scripts.
         "Programming Language :: Python :: 2.6",
         "Programming Language :: Python :: 2.7",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.3",
         "Programming Language :: Python :: 3.4",
         "Programming Language :: Python :: 3.5",
         "Programming Language :: Python :: 3.6",
@@ -124,12 +155,15 @@ specialized scripts.
     install_requires=[
         'pycrypto',
         'pymongo>=2.7.2',
+        'pyOpenSSL>=16.1.0',
         'future',
         'bottle',
     ],
     extras_require={
-        'Flow with Neo4j': ["py2neo>=3,<4"],
-        'PostgreSQL': ["sqlalchemy", "psycopg2"],
+        'Flow with Neo4j (deprecated)': ["py2neo>=3,<4"],
+        'TinyDB (experimental)': ["tinydb"],
+        'PostgreSQL (experimental)': ["sqlalchemy", "psycopg2"],
+        'Elasticsearch (experimental)': ["elasticsearch", "elasticsearch-dsl"],
         'GSSAPI authentication': ["python-krbV"],
         'Screenshots': ["PIL"],
         'MediaWiki integration': ["MySQL-python"],
@@ -140,14 +174,27 @@ specialized scripts.
               'ivre/tools', 'ivre/web'],
     scripts=['bin/ivre'],
     data_files=[
+        ('', ['README.md']),  # needed for the package description
         ('share/ivre/bro',
          ['bro/passiverecon2db-ignore.example']),
         ('share/ivre/bro/ivre',
          ['bro/ivre/__load__.bro']),
+        ('share/ivre/bro/ivre/arp',
+         ['bro/ivre/arp/__load__.bro']),
         ('share/ivre/bro/ivre/passiverecon',
          ['bro/ivre/passiverecon/__load__.bro',
           'bro/ivre/passiverecon/bare.bro',
           'bro/ivre/passiverecon/ja3.bro']),
+        ('share/ivre/zeek',
+         ['zeek/passiverecon2db-ignore.example']),
+        ('share/ivre/zeek/ivre',
+         ['zeek/ivre/__load__.zeek']),
+        ('share/ivre/zeek/ivre/arp',
+         ['zeek/ivre/arp/__load__.zeek']),
+        ('share/ivre/zeek/ivre/passiverecon',
+         ['zeek/ivre/passiverecon/__load__.zeek',
+          'zeek/ivre/passiverecon/bare.zeek',
+          'zeek/ivre/passiverecon/ja3.zeek']),
         ('share/ivre/honeyd', ['data/.empty']),
         ('share/ivre/geoip', ['data/.empty']),
         ('share/ivre/data', ['data/ike-vendor-ids']),

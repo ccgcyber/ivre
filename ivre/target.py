@@ -27,6 +27,10 @@ lists.
 
 
 from functools import reduce
+try:
+    from math import gcd
+except ImportError:
+    from fractions import gcd
 import os
 import random
 import re
@@ -91,7 +95,8 @@ class IterTarget(object):
             self.previous = random.randint(0, self.lcg_m - 1)
             # GCD(c, m) == 1
             self.lcg_c = random.randint(1, self.lcg_m - 1)
-            while mathutils.gcd(self.lcg_c, self.lcg_m) != 1:
+            # pylint: disable=deprecated-method
+            while gcd(self.lcg_c, self.lcg_m) != 1:
                 self.lcg_c = random.randint(1, self.lcg_m - 1)
             # a - 1 is divisible by all prime factors of m
             mfactors = reduce(lambda x, y: x * y,
@@ -349,7 +354,7 @@ class TargetZMapPreScan(TargetFile):
         zmap_opts += ['-p', str(port)]
         self.infos['zmap_pre_scan'] = zmap_opts[:]
         zmap_opts = [zmap] + zmap_opts + ['-o', '-']
-        self.tmpfile = tempfile.NamedTemporaryFile(delete=False)
+        self.tmpfile = tempfile.NamedTemporaryFile(delete=False, mode='w')
         for start, count in viewvalues(target.targets.ranges):
             for net in utils.range2nets((start, start + count - 1)):
                 self.tmpfile.write("%s\n" % net)
@@ -396,7 +401,7 @@ class TargetNmapPreScan(TargetZMapPreScan):
         self.infos['nmap_pre_scan'] = nmap_opts[:]
         # TODO: use -iL and feed target randomly when needed, w/o
         # using a temporary file
-        self.tmpfile = tempfile.NamedTemporaryFile(delete=False)
+        self.tmpfile = tempfile.NamedTemporaryFile(delete=False, mode='w')
         nmap_opts = [nmap, '-iL', self.tmpfile.name, '-oG', '-'] + nmap_opts
         for start, count in viewvalues(target.targets.ranges):
             for net in utils.range2nets((start, start + count - 1)):

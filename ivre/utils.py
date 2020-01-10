@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -50,17 +50,24 @@ import socket
 import struct
 import subprocess
 import time
-try:
-    import PIL.Image
-    import PIL.ImageChops
-    USE_PIL = True
-except ImportError:
-    USE_PIL = False
 
 
 from builtins import bytes, int as int_types, object, range, str
 from future.utils import PY3, viewitems, viewvalues
 from past.builtins import basestring
+try:
+    from OpenSSL import crypto as osslc
+except ImportError:
+    USE_PYOPENSSL = False
+else:
+    USE_PYOPENSSL = True
+try:
+    import PIL.Image
+    import PIL.ImageChops
+except ImportError:
+    USE_PIL = False
+else:
+    USE_PIL = True
 
 
 from ivre import config
@@ -534,10 +541,13 @@ def all2datetime(arg):
     if isinstance(arg, datetime.datetime):
         return arg
     if isinstance(arg, basestring):
-        try:
-            return datetime.datetime.strptime(arg, '%Y-%m-%d %H:%M:%S')
-        except ValueError:
-            return datetime.datetime.strptime(arg, '%Y-%m-%d %H:%M:%S.%f')
+        for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f',
+                    '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M:%S.%f']:
+            try:
+                return datetime.datetime.strptime(arg, fmt)
+            except ValueError:
+                pass
+        raise ValueError('time data %r does not match standard formats' % arg)
     if isinstance(arg, (int_types, float)):
         return datetime.datetime.fromtimestamp(arg)
     raise TypeError("%s is of unknown type." % repr(arg))
@@ -595,7 +605,7 @@ def diff(doc1, doc2):
         if key in ['categories']:
             set1 = set(doc1[key])
             set2 = set(doc2[key])
-            res[key] = [s for s in set1.symmetric_difference(set2)]
+            res[key] = list(set1.symmetric_difference(set2))
             if not res[key]:
                 del res[key]
             continue
@@ -724,6 +734,9 @@ class FileOpener(object):
 
     def read(self, *args):
         return self.fdesc.read(*args)
+
+    def readline(self):
+        return self.fdesc.readline()
 
     def fileno(self):
         return self.fdesc.fileno()
@@ -1273,6 +1286,107 @@ def find_ike_vendor_id(vendorid):
     return None
 
 
+_WIRESHARK_MANUF_DB_LAST_ADDR = []
+_WIRESHARK_MANUF_DB_VALUES = []
+_WIRESHARK_MANUF_DB_POPULATED = False
+
+
+def _mac2int(value):
+    """Converts a MAC address to an integer"""
+    return sum(
+        v << (40 - 8 * i)
+        for i, v in enumerate(int(v, 16) for v in value.split(':'))
+    )
+
+
+def _int2macmask(mask):
+    """Converts the number of bits set to 1 in a mask to the 48-bit
+    integer usable as a mask.
+
+    """
+    return (0xffffffffffff000000000000 >> mask) & 0xffffffffffff
+
+
+def _read_wireshark_manuf_db():
+    global _WIRESHARK_MANUF_DB_LAST_ADDR, _WIRESHARK_MANUF_DB_VALUES, \
+        _WIRESHARK_MANUF_DB_POPULATED
+
+    def parse_line(line):
+        line = line.split('#', 1)[0]
+        if not line:
+            return
+        line = line.strip()
+        if not line:
+            return
+        try:
+            addr, manuf, comment = line.split('\t', 2)
+        except ValueError:
+            try:
+                addr, manuf = line.split('\t', 1)
+            except ValueError:
+                LOGGER.warning('Cannot parse a line from Wireshark '
+                               'manufacturer database [%r].', line,
+                               exc_info=True)
+                return
+            comment = None
+        if '/' in addr:
+            addr, mask = addr.split('/')
+            mask = int(mask)
+        else:
+            mask = (addr.count(':') + 1) * 8
+        addr += ':00' * (5 - addr.count(':'))
+        try:
+            addr = _mac2int(addr)
+        except ValueError:
+            LOGGER.warning('Cannot parse a line from Wireshark '
+                           'manufacturer database [%r].', line)
+            return
+        if (
+                _WIRESHARK_MANUF_DB_LAST_ADDR and
+                _WIRESHARK_MANUF_DB_LAST_ADDR[-1] != addr - 1
+        ):
+            _WIRESHARK_MANUF_DB_LAST_ADDR.append(addr - 1)
+            _WIRESHARK_MANUF_DB_VALUES.append(None)
+        elif (
+                _WIRESHARK_MANUF_DB_VALUES and
+                _WIRESHARK_MANUF_DB_VALUES[-1] == (manuf, comment)
+        ):
+            _WIRESHARK_MANUF_DB_LAST_ADDR.pop()
+            _WIRESHARK_MANUF_DB_VALUES.pop()
+        _WIRESHARK_MANUF_DB_LAST_ADDR.append(
+            (addr & _int2macmask(mask)) + 2 ** (48 - mask) - 1
+        )
+        _WIRESHARK_MANUF_DB_VALUES.append(
+            (manuf, comment)
+        )
+    try:
+        with open(os.path.join(config.WIRESHARK_SHARE_PATH, 'manuf'),
+                  'r') as fdesc:
+            for line in fdesc:
+                parse_line(line[:-1])
+    except (AttributeError, TypeError, IOError):
+        LOGGER.warning('Cannot read Wireshark manufacturer database.',
+                       exc_info=True)
+    _WIRESHARK_MANUF_DB_POPULATED = True
+
+
+def get_wireshark_manuf_db():
+    global _WIRESHARK_MANUF_DB_LAST_ADDR, _WIRESHARK_MANUF_DB_VALUES, \
+        _WIRESHARK_MANUF_DB_POPULATED
+    if not _WIRESHARK_MANUF_DB_POPULATED:
+        _read_wireshark_manuf_db()
+    return _WIRESHARK_MANUF_DB_LAST_ADDR, _WIRESHARK_MANUF_DB_VALUES
+
+
+def mac2manuf(mac):
+    last_addr, values = get_wireshark_manuf_db()
+    try:
+        return values[bisect_left(last_addr, _mac2int(mac))]
+    except IndexError:
+        # empty lists, a warning must have been issued on db load
+        pass
+
+
 # Nmap (and Bro) encoding & decoding
 
 
@@ -1396,7 +1510,11 @@ datetime.datetime instance `dtm`"""
     try:
         return dtm.timestamp()
     except AttributeError:
-        return time.mktime(dtm.timetuple()) + dtm.microsecond / (1000000.)
+        try:
+            return time.mktime(dtm.timetuple()) + dtm.microsecond / (1000000.)
+        except ValueError:
+            # year out of range might happen
+            return (dtm - datetime.datetime.fromtimestamp(0)).total_seconds()
 
 
 def tz_offset(timestamp=None):
@@ -1521,9 +1639,19 @@ _ADDR_TYPES = [
     None,
     "Private",
     None,
+    "Reserved",
+    None,
+    "Documentation",
+    None,
     "IPv6-to-IPv4",
     None,
     "Private",
+    None,
+    "Benchmark",
+    None,
+    "Documentation",
+    None,
+    "Documentation",
     None,
     "Multicast",
     "Reserved",
@@ -1564,10 +1692,20 @@ _ADDR_TYPES_LAST_IP = [
     ip2int("::ffff:169.254.255.255"),
     ip2int("::ffff:172.15.255.255"),
     ip2int("::ffff:172.31.255.255"),
+    ip2int("::ffff:191.255.255.255"),
+    ip2int("::ffff:192.0.0.255"),
+    ip2int("::ffff:192.0.1.255"),
+    ip2int("::ffff:192.0.2.255"),
     ip2int("::ffff:192.88.98.255"),
     ip2int("::ffff:192.88.99.255"),
     ip2int("::ffff:192.167.255.255"),
     ip2int("::ffff:192.168.255.255"),
+    ip2int("::ffff:198.17.255.255"),
+    ip2int("::ffff:198.19.255.255"),
+    ip2int("::ffff:198.51.99.255"),
+    ip2int("::ffff:198.51.100.255"),
+    ip2int("::ffff:203.0.112.255"),
+    ip2int("::ffff:203.0.113.255"),
     ip2int("::ffff:223.255.255.255"),
     ip2int("::ffff:239.255.255.255"),
     ip2int("::ffff:255.255.255.254"),
@@ -1617,7 +1755,7 @@ _CERTINFOS = [
         b'\n(?:.*\n)* *'
         b'Public Key Algorithm: (?P<pubkeyalgo>rsaEncryption)'
         b'\n *'
-        b'Public-Key: \\((?P<bits>[0-9]+) bit\\)'
+        b'(?:RSA )?Public-Key: \\((?P<bits>[0-9]+) bit\\)'
         b'\n *'
         b'Modulus: *\n(?P<modulus>[\\ 0-9a-f:\n]+)'
         b'\n *'
@@ -1637,7 +1775,7 @@ _CERTINFOS = [
 
 _CERTINFOS_SAN = re.compile(
     b'\n *'
-    b'X509v3 Subject Alternative Name: *\n *(?P<san>.*)'
+    b'X509v3 Subject Alternative Name: *(?:critical *)?\n *(?P<san>.*)'
     b'(?:\n|$)'
 )
 
@@ -1650,6 +1788,13 @@ _CERTKEYS = {
     'OU': 'organizationalUnitName',
     'ST': 'stateOrProvinceName',
     'SN': 'surname',
+}
+
+_CERTALGOS = {
+    6: 'rsaEncryption',
+    408: 'id-ecPublicKey',
+    116: 'id-dsa',
+    28: 'dhpublicnumber',
 }
 
 
@@ -1712,9 +1857,63 @@ def _parse_cert_subject(subject):
     yield "".join(curkey), "".join(curvalue)
 
 
-def get_cert_info(cert):
+def _parse_subject(subject):
+    """Parses an X509Name object (from pyOpenSSL module) and returns a
+text and a dict suitable for use by get_cert_info().
+
+    """
+    components = []
+    for k, v in subject.get_components():
+        k = printable(k).decode()
+        v = printable(v).decode()
+        k = _CERTKEYS.get(k, k)
+        components.append((k, v))
+    return ('/'.join('%s=%s' % kv for kv in components),
+            dict(components))
+
+
+def _get_cert_info_pyopenssl(cert):
     """Extract info from a certificate (hash values, issuer, subject,
     algorithm) in an handy-to-index-and-query form.
+
+This version relies on the pyOpenSSL module.
+
+    """
+    result = {}
+    for hashtype in ['md5', 'sha1', 'sha256']:
+        result[hashtype] = hashlib.new(hashtype, cert).hexdigest()
+    cert = osslc.load_certificate(osslc.FILETYPE_ASN1, cert)
+    result['subject_text'], result['subject'] = _parse_subject(
+        cert.get_subject()
+    )
+    result['issuer_text'], result['issuer'] = _parse_subject(cert.get_issuer())
+    for i in range(cert.get_extension_count()):
+        ext = cert.get_extension(i)
+        if ext.get_short_name() == b'subjectAltName':
+            try:
+                result['san'] = [x.strip() for x in str(ext).split(', ')]
+            except Exception:
+                LOGGER.warning('Cannot decode subjectAltName %r for %r', ext,
+                               result['subject_text'], exc_info=True)
+            break
+    pubkey = cert.get_pubkey()
+    pubkeytype = pubkey.type()
+    result['pubkeyalgo'] = _CERTALGOS.get(pubkeytype, pubkeytype)
+    result['bits'] = pubkey.bits()
+    if pubkeytype == 6:
+        # RSA
+        numbers = pubkey.to_cryptography_key().public_numbers()
+        result['exponent'] = numbers.e
+        result['modulus'] = str(numbers.n)
+    return result
+
+
+def _get_cert_info_openssl(cert):
+    """Extract info from a certificate (hash values, issuer, subject,
+    algorithm) in an handy-to-index-and-query form.
+
+This version parses the output of "openssl x509 -text" command line,
+and is a fallback when pyOpenSSL cannot be imported.
 
     """
     result = {}
@@ -1745,6 +1944,13 @@ def get_cert_info(cert):
                                      for key, value in fdata)
                 result['%s_text' % field] = '/'.join('%s=%s' % item
                                                      for item in fdata)
+            elif field in ['bits', 'exponent']:
+                result[field] = int(fdata)
+            elif field == 'modulus':
+                result[field] = str(int(fdata
+                                        .replace(' ', '')
+                                        .replace(':', '')
+                                        .replace('\n', ''), 16))
             else:
                 result[field] = fdata
     except Exception:
@@ -1759,11 +1965,21 @@ def get_cert_info(cert):
     return result
 
 
+if USE_PYOPENSSL:
+    get_cert_info = _get_cert_info_pyopenssl
+else:
+    get_cert_info = _get_cert_info_openssl
+
+
 def display_top(db, arg, flt, lmt):
     field, least = ((arg[1:], True)
                     if arg[:1] in '!-~' else
                     (arg, False))
-    for entry in db.topvalues(field, flt=flt, topnbr=lmt or 10, least=least):
+    if lmt is None:
+        lmt = 10
+    elif lmt == 0:
+        lmt = None
+    for entry in db.topvalues(field, flt=flt, topnbr=lmt, least=least):
         if isinstance(entry['_id'], (list, tuple)):
             sep = ' / ' if isinstance(entry['_id'], tuple) else ', '
             if entry['_id']:

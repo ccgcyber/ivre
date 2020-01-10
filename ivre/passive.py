@@ -63,6 +63,16 @@ P0F_MODES = {
 
 P0F_DIST = re.compile(b'distance ([0-9]+),')
 
+DNSBL_START = re.compile(
+    '^(?:'
+    '(?:[0-9a-f]\\.){32}'
+    '|'
+    '(?:(?:(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}'
+    '(?:25[0-5]|(?:2[0-4]|1{0,1}[0-9]){0,1}[0-9])).'
+    ')',
+    re.I,
+)
+
 
 def parse_p0f_line(line, include_port=False, sensor=None, recontype=None):
     line = [line.split(b' - ')[0]] + line.split(b' - ')[1].split(b' -> ')
@@ -88,7 +98,7 @@ def parse_p0f_line(line, include_port=False, sensor=None, recontype=None):
         'distance': dist,
         'value': osname.decode(),
         'version': version.decode(),
-        'signature': ':'.join(str(elt) for elt in sig),
+        'signature': ':'.join(elt.decode() for elt in sig),
     }
     if include_port:
         spec.update({'port': int(line[0][line[0].index(b':') + 1:])})
@@ -133,7 +143,7 @@ TCP_SERVER_PATTERNS = [
         b'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [ 0-3]?[0-9] '
         b'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) '
         b'[12][0123456789]{3} [0-2][0-9]:[0-9][0-9]:[0-9][0-9]'
-    ), b'Thu 1 Jan 1970 00:00:00'),
+    ), b'Thu, 1 Jan 1970 00:00:00'),
     (re.compile(b'Local time is now [0-2][0-9]:[0-9][0-9]'),
      b'Local time is now 00:00'),
     (re.compile(
@@ -170,8 +180,16 @@ TCP_SERVER_PATTERNS = [
     ), b'220 \\g<1>0\\g<2>00\\g<3>000.mail.protection.outlook.com '),
     # Yahoo
     (re.compile(
-        b'220 mta[0-9]{4}\\.mail\\.([a-z0-9]+)\\.yahoo\\.com ESMTP ready'
+        b'^220 mta[0-9]{4}\\.mail\\.([a-z0-9]+)\\.yahoo\\.com ESMTP ready'
     ), b'220 mta0000.mail.\\1.yahoo.com ESMTP ready'),
+    # Communigate & other POP3 servers
+    (re.compile(
+        b'^\\+OK (.*) ready \\<[0-9]+\\.[0-9]+@'
+    ), b'+OK \\1 ready <000000.0000000000@'),
+    # IMAP servers
+    (re.compile(
+        b'^\\* OK (.*) IMAP Service ([0-9]+) imapd (.*) at (.*) ready'
+    ), b'* OK \\1 IMAP Service \\2 imapd \\3 at \\4 ready')
 ]
 
 
@@ -229,19 +247,23 @@ def _prepare_rec(spec, ignorenets, neverignore):
                                'HTTP_CLIENT_HEADER_SERVER'] and \
         spec.get('source') in ['AUTHORIZATION',
                                'PROXY-AUTHORIZATION']:
-        authtype = spec['value'].split(None, 1)[0]
-        if authtype.lower() == 'digest':
-            try:
-                # we only keep relevant info
-                value = [val for val in
-                         _split_digest_auth(spec['value'][6:].strip())
-                         if DIGEST_AUTH_INFOS.match(val)]
-                spec['value'] = '%s %s' % (authtype, ','.join(value))
-            except Exception:
-                utils.LOGGER.warning("Cannot parse digest error for %r", spec,
-                                     exc_info=True)
-        elif authtype.lower() in ['negotiate', 'kerberos', 'oauth', 'ntlm']:
-            spec['value'] = authtype
+        value = spec['value']
+        if value:
+            authtype = value.split(None, 1)[0]
+            if authtype.lower() == 'digest':
+                try:
+                    # we only keep relevant info
+                    spec['value'] = '%s %s' % (authtype, ','.join(
+                        val for val in
+                        _split_digest_auth(value[6:].strip())
+                        if DIGEST_AUTH_INFOS.match(val)
+                    ))
+                except Exception:
+                    utils.LOGGER.warning("Cannot parse digest error for %r",
+                                         spec, exc_info=True)
+            elif authtype.lower() in ['negotiate', 'kerberos', 'oauth',
+                                      'ntlm']:
+                spec['value'] = authtype
     # p0f in Bro hack: we use the "source" field to provide the
     # "distance" and "version" values
     elif spec['recontype'] == 'P0F':
@@ -279,11 +301,21 @@ def _prepare_rec(spec, ignorenets, neverignore):
         if any(spec['value'].endswith(dnsbl)
                for dnsbl in config.DNS_BLACKLIST_DOMAINS):
             dnsbl_val = spec['value']
-            spec['recontype'] = 'DNS_BLACKLIST'
-            spec['value'] = spec['addr']
-            spec.update({'source': "%s-%s" %
-                         (dnsbl_val.split('.', 4)[4], spec['source'])})
-            spec['addr'] = '.'.join(dnsbl_val.split('.')[3::-1])
+            match = DNSBL_START.search(dnsbl_val)
+            if match is not None:
+                spec['recontype'] = 'DNS_BLACKLIST'
+                spec['value'] = spec['addr']
+                spec.update({'source': "%s-%s" %
+                             (dnsbl_val[match.end():], spec['source'])})
+                addr = match.group()
+                # IPv4
+                if addr.count('.') == 4:
+                    spec['addr'] = '.'.join(addr.split('.')[3::-1])
+                # IPv6
+                else:
+                    spec['addr'] = utils.int2ip6(int(addr
+                                                     .replace('.', '')[::-1],
+                                                     16))
     return spec
 
 
@@ -317,10 +349,10 @@ def _getinfos_http_client_authorization(spec):
     infos = {}
     data = spec['value'].split(None, 1)
     if data[1:]:
-        if data[0].lower() == b'basic':
+        if data[0].lower() == 'basic':
             try:
                 infos['username'], infos['password'] = utils.decode_b64(
-                    data[1].strip()
+                    data[1].strip().encode()
                 ).decode('latin-1').split(':', 1)
             except Exception:
                 pass

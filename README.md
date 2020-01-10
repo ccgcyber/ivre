@@ -6,7 +6,7 @@
 
 # IVRE #
 
-<img align="right" src="web/static/logo.png" alt="Logo"/> IVRE
+<img align="right" src="https://ivre.rocks/logo.png" alt="Logo"/> IVRE
 (Instrument de veille sur les réseaux extérieurs) or DRUNK (Dynamic
 Recon of UNKnown networks) is a network recon framework, including
 tools for passive recon (flow analytics relying on
@@ -111,20 +111,20 @@ on the domain `ivre.rocks`.
 
 If you are using IVRE in you research, please cite it as follows:
 
-Pierre Lalet, Florent Monjalet, Camille Mougey and Vivien
-Venuti. *IVRE, a network recon framework*.
+Pierre Lalet, Florent Monjalet, Camille Mougey, Vincent Ruello and
+Vivien Venuti. *IVRE, a network recon framework*.
 [https://github.com/cea-sec/ivre](https://github.com/cea-sec/ivre),
-2011-2018.
+2011-2019.
 
 Here is the appropriate bibtex entry:
 
     @MISC{ivre,
         title = {{IVRE}, a network recon framework},
-        author={Lalet, Pierre and Monjalet, Florent and Mougey, Camille and Venuti, Viven},
+        author={Lalet, Pierre and Monjalet, Florent and Mougey, Camille and Ruello, Vincent and Venuti, Viven},
         url = {https://ivre.rocks/},
         howpublished = {\url{https://github.com/cea-sec/ivre/}},
         institution = {{CEA}: the French Alternative Energies and Atomic Energy Commission},
-        year = {2011--2018},
+        year = {2011--2019},
     }
 
 ### Technical documents & blog posts ###
@@ -139,4 +139,4 @@ On twitter, you can follow and/or mention
 
 ---
 
-This file is part of IVRE. Copyright 2011 - 2018 [Pierre LALET](mailto:pierre.lalet@cea.fr).
+This file is part of IVRE. Copyright 2011 - 2019 [Pierre LALET](mailto:pierre.lalet@cea.fr).

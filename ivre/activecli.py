@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -265,10 +265,25 @@ def _display_xml_host(h, out=sys.stdout):
         out.write('/>')
     out.write('\n')
     if 'addr' in h:
-        out.write('<address addr="%s" addrtype="ipv4"/>\n' % h['addr'])
-    for t in h.get('addresses', []):
-        for a in h['addresses'][t]:
-            out.write('<address addr="%s" addrtype="%s"/>\n' % (a, t))
+        out.write('<address addr="%s" addrtype="ipv%d"/>\n' % (
+            h['addr'],
+            6 if ':' in h['addr'] else 4,
+        ))
+    for atype, addrs in viewitems(h.get('addresses', {})):
+        for addr in addrs:
+            extra = ""
+            if atype == "mac":
+                manuf = utils.mac2manuf(addr)
+                # if manuf:
+                #     if len(manuf) > 1 and manuf[1]:
+                #         manuf = manuf[1]
+                #     else:
+                #         manuf = manuf[0]
+                #     extra = ' vendor=%s' % saxutils.quoteattr(manuf[0])
+                if manuf and manuf[0]:
+                    extra = ' vendor=%s' % saxutils.quoteattr(manuf[0])
+            out.write('<address addr="%s" addrtype="%s"%s/>\n' % (addr, atype,
+                                                                  extra))
     if 'hostnames' in h:
         out.write('<hostnames>\n')
         for hostname in h['hostnames']:
@@ -341,9 +356,7 @@ def _display_xml_host(h, out=sys.stdout):
                     saxutils.quoteattr(str(hop['ttl']))
                 ))
             if 'ipaddr' in hop:
-                out.write(' ipaddr=%s' % (
-                    saxutils.quoteattr(utils.int2ip(hop['ipaddr']))
-                ))
+                out.write(' ipaddr=%s' % (saxutils.quoteattr(hop['ipaddr'])))
             if 'rtt' in hop:
                 out.write(' rtt=%s' % (
                     saxutils.quoteattr('%.2f' % hop['rtt']
@@ -461,13 +474,13 @@ def displayfunction_gnmap(cur):
         _display_gnmap_host(h, out=sys.stdout)
 
 
-def displayfunction_explain(flt, db):
-    sys.stdout.write(db.explain(db._get(flt), indent=4) + '\n')
+def displayfunction_explain(flt, dbase):
+    sys.stdout.write(dbase.explain(dbase._get(flt), indent=4) + '\n')
 
 
-def displayfunction_remove(cur, db):
+def displayfunction_remove(cur, dbase):
     for h in cur:
-        db.remove(h)
+        dbase.remove(h)
 
 
 def displayfunction_graphroute(cur, arg, gr_include, gr_dont_reset):
@@ -548,7 +561,7 @@ def displayfunction_csv(cur, arg, csv_sep, csv_na_str, add_infos):
         _displayhost_csv(fields, csv_sep, csv_na_str, h, out=sys.stdout)
 
 
-def displayfunction_json(cur, db, no_screenshots=False):
+def displayfunction_json(cur, dbase, no_screenshots=False):
     if os.isatty(sys.stdout.fileno()):
         indent = 4
     else:
@@ -566,24 +579,24 @@ def displayfunction_json(cur, db, no_screenshots=False):
                         del port[fname]
             elif 'screendata' in port:
                 port['screendata'] = utils.encode_b64(
-                    db.from_binary(port['screendata'])
+                    dbase.from_binary(port['screendata'])
                 )
             for script in port.get('scripts', []):
                 if 'masscan' in script and 'raw' in script['masscan']:
                     script['masscan']['raw'] = utils.encode_b64(
-                        db.from_binary(
+                        dbase.from_binary(
                             script['masscan']['raw']
                         )
                     )
         print(json.dumps(h, indent=indent,
-                         default=db.serialize))
+                         default=dbase.serialize))
 
 
-def display_short(db, flt, srt, lmt, skp):
-    for val in db.distinct("addr", flt=flt, sort=srt, limit=lmt, skip=skp):
-        sys.stdout.write(db.internal2ip(val) + '\n')
+def display_short(dbase, flt, srt, lmt, skp):
+    for val in dbase.distinct("addr", flt=flt, sort=srt, limit=lmt, skip=skp):
+        sys.stdout.write(val + '\n')
 
 
-def display_distinct(db, arg, flt, srt, lmt, skp):
-    for val in db.distinct(arg, flt=flt, sort=srt, limit=lmt, skip=skp):
+def display_distinct(dbase, arg, flt, srt, lmt, skp):
+    for val in dbase.distinct(arg, flt=flt, sort=srt, limit=lmt, skip=skp):
         sys.stdout.write(str(val) + '\n')

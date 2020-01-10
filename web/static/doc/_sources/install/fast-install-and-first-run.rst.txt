@@ -33,19 +33,6 @@ Install
    $ python setup.py build
    $ sudo python setup.py install
 
-NB: if you are running Debian stable, the dokuwiki package has been
-removed (no idea why: it exists in both oldstable and testing). Run the
-following commands (or similar) if you cannot install dokuwiki, and try
-again:
-
-::
-
-   $ echo 'APT::Default-Release "stable";' | \
-   >   sudo tee /etc/apt/apt.conf.d/99defaultrelease
-   $ echo 'deb http://deb.debian.org/debian testing main' | \
-   >   sudo tee -a /etc/apt/sources.list
-   $ sudo apt-get update
-
 Setup
 -----
 
@@ -91,10 +78,7 @@ Database init, data download & importation
    $ yes | ivre view --init
    $ yes | ivre flowcli --init
    $ yes | sudo ivre runscansagentdb --init
-   $ sudo ivre ipdata --download --import-all
-
-The two last step may take a long time to run (40 minutes on a decent
-server), nothing to worry about.
+   $ sudo ivre ipdata --download
 
 Run a first scan
 ----------------

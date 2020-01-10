@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -171,6 +171,7 @@ def _extract_passive_SSL_SERVER_cert(rec):
         'state_reason': "passive",
         'port': rec['port'],
         'protocol': rec.get('protocol', 'tcp'),
+        'service_tunnel': 'ssl',
     }
     output, info = create_ssl_cert(rec['value'], b64encoded=False)
     if info:
@@ -234,6 +235,22 @@ def _extract_passive_SSL_CLIENT(rec):
     return {'ports': [port]}
 
 
+def _extract_passive_MAC_ADDRESS(rec):
+    """Handle MAC addresses"""
+    return {"addresses": {"mac": [rec["value"]]}}
+
+
+def _extract_passive_OPEN_PORT(rec):
+    """Handle open ports"""
+    port = {
+        'state_state': 'open',
+        'state_reason': 'passive',
+        'port': rec['port'],
+        'protocol': rec.get('source', 'tcp').lower(),
+    }
+    return {'ports': [port]}
+
+
 _EXTRACTORS = {
     # 'HTTP_CLIENT_HEADER_SERVER': _extract_passive_HTTP_CLIENT_HEADER_SERVER,
     'HTTP_CLIENT_HEADER': _extract_passive_HTTP_CLIENT_HEADER,
@@ -246,10 +263,12 @@ _EXTRACTORS = {
     'SSH_SERVER': _extract_passive_TCP_SERVER_BANNER,
     'SSH_SERVER_HOSTKEY': _extract_passive_SSH_SERVER_HOSTKEY,
     'TCP_SERVER_BANNER': _extract_passive_TCP_SERVER_BANNER,
+    'MAC_ADDRESS': _extract_passive_MAC_ADDRESS,
+    'OPEN_PORT': _extract_passive_OPEN_PORT,
 }
 
 
-def passive_record_to_view(rec):
+def passive_record_to_view(rec, category=None):
     """Return a passive entry in the View format.
 
     Note that this entry is likely to have no sense in itself. This
@@ -286,14 +305,16 @@ def passive_record_to_view(rec):
         if port.get('state_state') != 'open':
             continue
         openports['count'] += 1
-        protoopenports = openports.setdefault(port['protocol'],
-                                              {'count': 0, 'ports': []})
-        protoopenports['count'] += 1
-        protoopenports['ports'].append(port['port'])
+        cur = openports.setdefault(port['protocol'], {'count': 0, 'ports': []})
+        if port['port'] not in cur['ports']:
+            cur["count"] += 1
+            cur["ports"].append(port['port'])
+    if category is not None:
+        outrec['categories'] = [category]
     return outrec
 
 
-def passive_to_view(flt):
+def passive_to_view(flt, category=None):
     """Generates passive entries in the View format.
 
     Note that this entry is likely to have no sense in itself. This
@@ -302,14 +323,14 @@ def passive_to_view(flt):
 
     """
     for rec in db.passive.get(flt, sort=[("addr", 1)]):
-        outrec = passive_record_to_view(rec)
+        outrec = passive_record_to_view(rec, category=category)
         if outrec is not None:
             yield outrec
 
 
-def from_passive(flt):
+def from_passive(flt, category=None):
     """Iterator over passive results, by address."""
-    records = passive_to_view(flt)
+    records = passive_to_view(flt, category=category)
     cur_addr = None
     cur_rec = {}
     for rec in records:
@@ -332,10 +353,12 @@ def from_passive(flt):
         yield cur_rec
 
 
-def nmap_record_to_view(rec):
+def nmap_record_to_view(rec, category=None):
     """Convert an nmap result in view.
 
     """
+    if '_id' in rec:
+        del rec['_id']
     if 'scanid' in rec:
         del rec['scanid']
     if 'source' in rec:
@@ -343,10 +366,23 @@ def nmap_record_to_view(rec):
             rec['source'] = []
         elif not isinstance(rec['source'], list):
             rec['source'] = [rec['source']]
+    rec.setdefault('categories', [])
+    if category is not None:
+        rec['categories'].append(category)
+    for port in rec.get('ports', []):
+        for script in port.get('scripts', []):
+            if 'masscan' in script and 'raw' in script['masscan']:
+                script['masscan']['raw'] = db.nmap.from_binary(
+                    script['masscan']['raw']
+                )
+            if 'screendata' in script:
+                script['screendata'] = db.nmap.from_binary(
+                    script['screendata']
+                )
     return rec
 
 
-def from_nmap(flt):
+def from_nmap(flt, category=None):
     """Return an Nmap entry in the View format."""
     cur_addr = None
     cur_rec = None
@@ -354,7 +390,7 @@ def from_nmap(flt):
     for rec in db.nmap.get(flt, sort=[("addr", 1)]):
         if 'addr' not in rec:
             continue
-        rec = nmap_record_to_view(rec)
+        rec = nmap_record_to_view(rec, category=category)
         if cur_addr is None:
             cur_addr = rec['addr']
             cur_rec = rec
@@ -382,6 +418,20 @@ def to_view(itrs):
             return updt
         return db.view.merge_host_docs(rec, updt)
     next_recs = []
+
+    def prepare_record(rec):
+        for port in rec.get('ports', []):
+            for script in port.get('scripts', []):
+                if 'masscan' in script and 'raw' in script['masscan']:
+                    script['masscan']['raw'] = db.view.to_binary(
+                        script['masscan']['raw']
+                    )
+                if 'screendata' in script:
+                    script['screendata'] = db.view.to_binary(
+                        script['screendata']
+                    )
+        return rec
+
     # We cannot use a `for itr in itrs` loop here because itrs is
     # modified in the loop.
     i = 0
@@ -419,8 +469,8 @@ def to_view(itrs):
                 next_addrs[i] = next_recs[i]['addr']
             i += 1
         if next_addrs and cur_addr not in next_addrs:
-            yield cur_rec
+            yield prepare_record(cur_rec)
             cur_rec = None
             cur_addr = min(next_addrs)
     if cur_rec is not None:
-        yield cur_rec
+        yield prepare_record(cur_rec)

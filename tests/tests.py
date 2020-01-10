@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -68,6 +68,7 @@ import ivre.passive
 import ivre.utils
 import ivre.web.utils
 import ivre.flow
+import ivre.xmlnmap
 
 HTTPD_PORT = 18080
 HTTPD_HOSTNAME = socket.gethostname()
@@ -321,7 +322,7 @@ class IvreTests(unittest.TestCase):
         if pid == -1:
             raise OSError("Cannot fork()")
         if pid:
-            cls.children.append(pid)
+            cls.web_srv_pid = pid
             time.sleep(2)
         else:
             def terminate(signum, _):
@@ -341,6 +342,19 @@ class IvreTests(unittest.TestCase):
             proc.wait()
             sys.exit(0)
 
+    def stop_web_server(cls):
+        if cls.web_srv_pid is None:
+            return
+        for sig in [signal.SIGINT, signal.SIGTERM, signal.SIGKILL]:
+            os.kill(cls.web_srv_pid, sig)
+            time.sleep(2)
+        os.waitpid(cls.web_srv_pid, 0)
+        cls.web_srv_pid = None
+
+    def restart_web_server(cls):
+        cls.stop_web_server()
+        cls.start_web_server()
+
     @classmethod
     def stop_children(cls):
         for sig in [signal.SIGINT, signal.SIGTERM, signal.SIGKILL]:
@@ -349,9 +363,13 @@ class IvreTests(unittest.TestCase):
                     os.kill(pid, sig)
                 except OSError:
                     cls.children.remove(pid)
+            if cls.web_srv_pid is not None:
+                os.kill(cls.web_srv_pid, sig)
             time.sleep(2)
         while cls.children:
             os.waitpid(cls.children.pop(), 0)
+        if cls.web_srv_pid is not None:
+            os.waitpid(cls.web_srv_pid, 0)
 
     @staticmethod
     def _sort_top_values(listval):
@@ -440,12 +458,29 @@ class IvreTests(unittest.TestCase):
                 self.assertEqual(name_or_value, count)
         return count
 
-    def check_flow_top_values(self, name, cmd):
+    def check_flow_top_values(self, name, fields, sum_fields=None,
+                              collect_fields=None, test_api=True):
+        # Test cli
+        cmd = ['ivre', 'flowcli', '--limit', '1', '--top'] + fields
+        if sum_fields:
+            cmd += ['--sum'] + sum_fields
+        if collect_fields:
+            cmd += ['--collect'] + collect_fields
         res, out, err = RUN(cmd)
         self.assertEqual(res, 0)
         self.assertTrue(not err)
+        # Check only fields and count
         result = out.decode().rsplit('|', 1)[0]
         self.check_value(name, result)
+        if test_api:
+            # Test api
+            flt = ivre.db.db.flow.from_filters({})
+            values = list(ivre.db.db.flow.topvalues(
+                flt,
+                fields, sum_fields=sum_fields, collect_fields=collect_fields,
+                topnbr=2))
+            self.assertTrue(values[0]['count'] >= values[1]['count'])
+            self.check_value(name + '_api', sorted(values[0]['collected']))
 
     def check_flow_count_value_cli(self, name_or_value, cliflt, command="",
                                    **kwargs):
@@ -603,6 +638,7 @@ which `predicate()` is True, given `webflt`.
             if fname.endswith('.pcap')
         ]
         cls.children = []
+        cls.web_srv_pid = None
         # Start a Web server
         cls.start_web_server()
 
@@ -615,6 +651,15 @@ which `predicate()` is True, given `webflt`.
         self.assertEqual(RUN(["ivre", "scancli", "--init"],
                              stdin=open(os.devnull))[0], 0)
         self.assertEqual(RUN(["ivre", "scancli", "--count"])[1], b"0\n")
+
+    def test_20_fake_nmap_passive(self):
+        """For Elasticsearch backend: insert results in MongoDB nmap & passive
+purposes to feed Elasticsearch view.
+
+        """
+        if DATABASE != "elastic":
+            return
+        subprocess.check_call(["mongorestore", "--db", "ivre", "../backup/"])
 
     def test_30_nmap(self):
 
@@ -709,46 +754,89 @@ which `predicate()` is True, given `webflt`.
             self.assertEqual(sum(host_stored_test(line)
                                  for line in out.splitlines()), 1)
             os.unlink(fdesc.name)
-        # Screenshots: this tests the http-screenshot script
-        # (including phantomjs) and IVRE's ability to read
-        # screenshots (including extracting words with tesseract)
-        ipaddr = socket.gethostbyname('ivre.rocks')
-        with AgentScanner(self, nmap_template="http") as agent:
-            agent.scan(['--net', '%s/32' % ipaddr])
-        data_files, up_files = (
-            glob("%s.%s*" % (os.path.join('output', 'MISC', subdir,
-                                          '*', *ipaddr.split('.')), ext))
-            for subdir, ext in [('data', 'tar'), ('up', 'xml')]
-        )
-        self.assertEqual(len(data_files), 1)
-        self.assertTrue(os.path.exists(data_files[0]))
-        self.assertEqual(len(up_files), 1)
-        self.assertTrue(os.path.exists(up_files[0]))
-        # TarFile object does not implement __exit__ on Python 2.6,
-        # cannot use `with`
-        data_archive = tarfile.open(data_files[0])
-        data_archive.extractall()
-        data_archive.close()
-        self.assertTrue(os.path.exists('screenshot-%s-80.jpg' % ipaddr))
-        res, out, _ = RUN(["ivre", "scan2db", "--test"] + up_files)
-        self.assertEqual(res, 0)
 
-        def _json_loads(data, deflt=None):
-            try:
-                return json.loads(data.decode())
-            except ValueError:
-                return deflt
-        screenshots_count = sum(bool(port.get('screendata'))
-                                for line in out.splitlines()
-                                for host in _json_loads(line, [])
-                                for port in host.get('ports', []))
-        self.assertEqual(screenshots_count, 1)
-        screenwords = set(word for line in out.splitlines()
-                          for host in _json_loads(line, [])
-                          for port in host.get('ports', [])
-                          for word in port.get('screenwords', []))
-        self.assertTrue('IVRE' in screenwords)
-        shutil.rmtree('output')
+        # Test various structured results for smb-enum-shares
+        # before commit 79d25c5c6e4e2c3298f4f0771a183e82d06bfabe
+        json_12_smb_enum_shares_old = {
+            'note': 'ERROR: Enumerating shares failed, guessing at common ones'
+            ' (NT_STATUS_ACCESS_DENIED)',
+            'account_used': '<blank>',
+            '\\\\10_0_0_1\\C$': {
+                'warning': "Couldn't get details for share: "
+                "NT_STATUS_ACCESS_DENIED",
+                'Anonymous access': '<none>',
+            },
+            '\\\\10_0_0_1\\IPC$': {
+                'warning': "Couldn't get details for share: "
+                "NT_STATUS_ACCESS_DENIED",
+                'Anonymous access': 'READ',
+            },
+            '\\\\10_0_0_1\\ADMIN$': {
+                'warning': "Couldn't get details for share: "
+                "NT_STATUS_ACCESS_DENIED",
+                'Anonymous access': '<none>',
+            },
+            '\\\\10_0_0_1\\ADMIN_SOFTWARE': {
+                'warning': "Couldn't get details for share: "
+                "NT_STATUS_ACCESS_DENIED",
+                'Anonymous access': '<none>',
+            },
+        }
+        # after commit 79d25c5c6e4e2c3298f4f0771a183e82d06bfabe
+        json_12_smb_enum_shares_new = {
+            'note': 'ERROR: Enumerating shares failed, guessing at common ones'
+            ' (NT_STATUS_ACCESS_DENIED)',
+            'account_used': '<blank>',
+            'shares': [
+                {'warning': "Couldn't get details for share: "
+                 "NT_STATUS_ACCESS_DENIED",
+                 'Share': '\\\\10_0_0_1\\C$',
+                 'Anonymous access': '<none>'},
+                {'warning': "Couldn't get details for share: "
+                 "NT_STATUS_ACCESS_DENIED",
+                 'Share': '\\\\10_0_0_1\\IPC$',
+                 'Anonymous access': 'READ'},
+                {'warning': "Couldn't get details for share: "
+                 "NT_STATUS_ACCESS_DENIED",
+                 'Share': '\\\\10_0_0_1\\ADMIN$',
+                 'Anonymous access': '<none>'},
+                {'warning': "Couldn't get details for share: "
+                 "NT_STATUS_ACCESS_DENIED",
+                 'Share': '\\\\10_0_0_1\\ADMIN_SOFTWARE',
+                 'Anonymous access': '<none>'},
+            ]
+        }
+        json_13_expect_output = {
+            'account_used': '<blank>',
+            'note': 'ERROR: Enumerating shares failed, guessing at common ones'
+            ' (NT_STATUS_ACCESS_DENIED)',
+            'shares': [
+                {'Anonymous access': '<none>',
+                 'Share': '\\\\10.0.0.1\\ADMIN$',
+                 'warning': "Couldn't get details for share: "
+                 "NT_STATUS_ACCESS_DENIED"},
+                {'Anonymous access': '<none>',
+                 'Share': '\\\\10.0.0.1\\ADMIN_SOFTWARE',
+                 'warning': "Couldn't get details for share: "
+                 "NT_STATUS_ACCESS_DENIED"},
+                {'Anonymous access': '<none>',
+                 'Share': '\\\\10.0.0.1\\C$',
+                 'warning': "Couldn't get details for share: "
+                 "NT_STATUS_ACCESS_DENIED"},
+                {'Anonymous access': 'READ',
+                 'Share': '\\\\10.0.0.1\\IPC$',
+                 'warning': "Couldn't get details for share: "
+                 "NT_STATUS_ACCESS_DENIED"},
+            ]
+        }
+        self.assertEqual(
+            json_13_expect_output,
+            ivre.xmlnmap.change_smb_enum_shares(json_12_smb_enum_shares_old),
+        )
+        self.assertEqual(
+            json_13_expect_output,
+            ivre.xmlnmap.change_smb_enum_shares(json_12_smb_enum_shares_new),
+        )
 
         RUN(["ivre", "scancli", "--update-schema"])
 
@@ -758,6 +846,13 @@ which `predicate()` is True, given `webflt`.
         hosts_count = self.check_nmap_count_value("nmap_get_count",
                                                   ivre.db.db.nmap.flt_empty,
                                                   [], None)
+
+        # Check schema version
+        self.check_count_value_api(
+            hosts_count,
+            ivre.db.db.nmap.searchversion(ivre.xmlnmap.SCHEMA_VERSION),
+            database=ivre.db.db.nmap,
+        )
 
         self.check_count_value_api(0, ivre.db.db.nmap.searchnonexistent(),
                                    database=ivre.db.db.nmap)
@@ -788,10 +883,10 @@ which `predicate()` is True, given `webflt`.
         # Object ID
         res, out, _ = RUN(["ivre", "scancli", "--json", "--limit", "1"])
         self.assertEqual(res, 0)
-        oid = str(next(ivre.db.db.nmap.get(
+        oid = str(next(iter(ivre.db.db.nmap.get(
             ivre.db.db.nmap.searchhost(json.loads(out.decode())['addr']),
             limit=1, fields=["_id"],
-        ))['_id'])
+        )))['_id'])
         res, out, _ = RUN(["ivre", "scancli", "--count", "--id", oid])
         self.assertEqual(res, 0)
         self.assertEqual(int(out), 1)
@@ -828,29 +923,29 @@ which `predicate()` is True, given `webflt`.
         )
 
         # Filters
-        addr = next(ivre.db.db.nmap.get(
+        addr = next(iter(ivre.db.db.nmap.get(
             ivre.db.db.nmap.flt_empty, fields=["addr"]
-        ))['addr']
+        )))['addr']
         self.check_nmap_count_value(1, ivre.db.db.nmap.searchhost(addr),
                                     ['--host', ivre.utils.force_int2ip(addr)],
                                     ivre.utils.force_int2ip(addr))
-        result = next(ivre.db.db.nmap.get(
+        result = next(iter(ivre.db.db.nmap.get(
             ivre.db.db.nmap.searchhost(addr)
-        ))
+        )))
         self.assertEqual(result['addr'], addr)
         self.check_count_value_api(1, ivre.db.db.nmap.flt_and(
             ivre.db.db.nmap.searchhost(addr),
             ivre.db.db.nmap.searchhost(addr),
         ), database=ivre.db.db.nmap)
         recid = ivre.db.db.nmap.getid(
-            next(ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty))
+            next(iter(ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty)))
         )
         self.check_count_value_api(1, ivre.db.db.nmap.searchid(recid),
                                    database=ivre.db.db.nmap)
         self.assertIsNotNone(
             ivre.db.db.nmap.getscan(
                 ivre.db.db.nmap.getscanids(
-                    next(ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty))
+                    next(iter(ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty)))
                 )[0]
             )
         )
@@ -859,7 +954,7 @@ which `predicate()` is True, given `webflt`.
                                     ivre.db.db.nmap.searchhost("127.12.34.56"),
                                     ["--host", "127.12.34.56"], "127.12.34.56")
 
-        generator = ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty)
+        generator = iter(ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty))
         addrrange = sorted((x['addr'] for x in [next(generator),
                                                 next(generator)]),
                            key=ivre.utils.force_ip2int)
@@ -881,7 +976,7 @@ which `predicate()` is True, given `webflt`.
         self.assertEqual(count, addr_range_count)
 
         addrs = set(
-            ivre.db.db.nmap.internal2ip(addr)
+            addr
             for net in ivre.utils.range2nets(addrrange)
             for addr in ivre.db.db.nmap.distinct(
                 "addr", flt=ivre.db.db.nmap.searchnet(net),
@@ -900,11 +995,11 @@ which `predicate()` is True, given `webflt`.
 
         count = ivre.db.db.nmap.count(
             ivre.db.db.nmap.searchtimerange(
-                0, next(ivre.db.db.nmap.get(
+                0, next(iter(ivre.db.db.nmap.get(
                     ivre.db.db.nmap.flt_empty,
                     fields=['endtime'],
                     sort=[['endtime', -1]]
-                ))['endtime']
+                )))['endtime']
             )
         )
         self.assertEqual(count, hosts_count)
@@ -921,7 +1016,7 @@ which `predicate()` is True, given `webflt`.
                     "addr",
                     flt=ivre.db.db.nmap.searchnet(net),
             ):
-                addr = ivre.utils.ip2int(ivre.db.db.nmap.internal2ip(addr))
+                addr = ivre.utils.ip2int(addr)
                 self.assertTrue(start <= addr <= stop)
         self.assertEqual(count, addr_range_count)
         # Networks in `nets` are separated sets
@@ -954,7 +1049,7 @@ which `predicate()` is True, given `webflt`.
         result = ivre.db.db.nmap.get(
             ivre.db.db.nmap.searchscript(name="http-robots.txt")
         )
-        addr = next(result)['addr']
+        addr = next(iter(result))['addr']
         count = ivre.db.db.nmap.count(ivre.db.db.nmap.flt_and(
             ivre.db.db.nmap.searchscript(name="http-robots.txt"),
             ivre.db.db.nmap.searchhost(addr),
@@ -1028,7 +1123,7 @@ which `predicate()` is True, given `webflt`.
         hop = random.choice([
             hop for hop in
             reduce(lambda x, y: x['hops'] + y['hops'],
-                   next(result)['traces'],
+                   next(iter(result))['traces'],
                    {'hops': []})
             if 'domains' in hop and hop['domains']
         ])
@@ -1042,16 +1137,18 @@ which `predicate()` is True, given `webflt`.
         self.assertGreaterEqual(count, 1)
 
         # Indexes
-        addr = next(ivre.db.db.nmap.get(
+        addr = next(iter(ivre.db.db.nmap.get(
             ivre.db.db.nmap.flt_empty
-        ))['addr']
+        )))['addr']
         addr_net = '.'.join(addr.split('.')[:3]) + '.0/24'
         queries = [
             ivre.db.db.nmap.searchhost(addr),
             ivre.db.db.nmap.searchnet(addr_net),
-            ivre.db.db.nmap.searchrange(max(ivre.utils.ip2int(addr) - 256, 0),
-                                        min(ivre.utils.ip2int(addr) + 256,
-                                            4294967295)),
+            ivre.db.db.nmap.searchrange(
+                ivre.utils.int2ip(max(ivre.utils.ip2int(addr) - 256, 0)),
+                ivre.utils.int2ip(min(ivre.utils.ip2int(addr) + 256,
+                                      4294967295)),
+            ),
         ]
         for query in queries:
             result = ivre.db.db.nmap.get(query)
@@ -1069,7 +1166,7 @@ which `predicate()` is True, given `webflt`.
                     query,
                     ivre.db.db.nmap.str2flt(ivre.db.db.nmap.flt2str(query))
                 )
-            if DATABASE == "postgres":
+            elif DATABASE == "postgres":
                 output = ivre.db.db.nmap.explain(ivre.db.db.nmap._get(query))
                 self.assertTrue("ix_n_scan_host" in output)
 
@@ -1120,9 +1217,9 @@ which `predicate()` is True, given `webflt`.
                                          neg=True)
         )
         self.check_value("nmap_not_domain_com_or_net_count", count)
-        name = next(ivre.db.db.nmap.get(ivre.db.db.nmap.searchdomain(
+        name = next(iter(ivre.db.db.nmap.get(ivre.db.db.nmap.searchdomain(
             'com'
-        )))['hostnames'][0]['name']
+        ))))['hostnames'][0]['name']
         count = ivre.db.db.nmap.count(ivre.db.db.nmap.searchhostname(name))
         self.assertGreater(count, 0)
         count = ivre.db.db.nmap.count(ivre.db.db.nmap.searchcategory("TEST"))
@@ -1192,11 +1289,11 @@ which `predicate()` is True, given `webflt`.
         #     "nmap_isakmp_top_products",
         #     ["ivre", "scancli", "--top", "product", "--service", "isakmp"],
         # )
-        self.check_nmap_top_value("nmap_ssh_top_port", "port:ssh")
-        self.check_nmap_top_value("nmap_http_top_content_type",
+        self.check_nmap_top_value("nmap_top_ssh_port", "port:ssh")
+        self.check_nmap_top_value("nmap_top_http_content_type",
                                   "httphdr:content-type")
-        self.check_nmap_top_value("nmap_http_top_header", "httphdr.name")
-        self.check_nmap_top_value("nmap_http_top_header_value",
+        self.check_nmap_top_value("nmap_top_http_header", "httphdr.name")
+        self.check_nmap_top_value("nmap_top_http_header_value",
                                   "httphdr.value")
         self.check_lines_value_cmd(
             "nmap_domains_pttsh_tw",
@@ -1205,10 +1302,30 @@ which `predicate()` is True, given `webflt`.
         )
         self.check_nmap_top_value("nmap_top_s7_module_name", "s7.module_name")
         self.check_nmap_top_value("nmap_top_s7_plant", "s7.plant")
-        self.check_nmap_top_value("nmap_top_isotsap_product",
+        self.check_nmap_top_value("nmap_top_product_isotsap",
                                   "product:iso-tsap")
         self.check_nmap_top_value("nmap_top_cert_issuer", "cert.issuer")
         self.check_nmap_top_value("nmap_top_cert_subject", "cert.subject")
+        for hashtype in ['md5', 'sha1', 'sha256']:
+            self.check_nmap_top_value("nmap_top_cert_%s" % hashtype,
+                                      "cert.%s" % hashtype)
+            for val in self._sort_top_values(
+                    ivre.db.db.nmap.topvalues('cert.%s' % hashtype)
+            ):
+                for host in ivre.db.db.nmap.get(
+                        ivre.db.db.nmap.searchcert(**{hashtype: val})
+                ):
+                    found = False
+                    for port in host['ports']:
+                        for script in port.get('scripts', []):
+                            if script['id'] == 'ssl-cert' and script.get(
+                                    'ssl-cert', {}
+                            ).get(hashtype) == val:
+                                found = True
+                                break
+                        if found:
+                            break
+                    self.assertTrue(found)
         self._check_top_value_cli("nmap_top_filename", "file",
                                   command="scancli")
         self._check_top_value_cli("nmap_top_filename", "file.filename",
@@ -1223,7 +1340,7 @@ which `predicate()` is True, given `webflt`.
         self._check_top_value_cli("nmap_top_modbus_deviceids",
                                   "modbus.deviceid",
                                   command="scancli")
-        self._check_top_value_cli("nmap_top_services", "service",
+        self._check_top_value_cli("nmap_top_service", "service",
                                   command="scancli")
         self._check_top_value_cli("nmap_top_product", "product",
                                   command="scancli")
@@ -1236,31 +1353,27 @@ which `predicate()` is True, given `webflt`.
         self._check_top_value_cli("nmap_top_version_http_apache",
                                   "version:http:Apache httpd",
                                   command="scancli")
-        categories = ivre.db.db.nmap.topvalues("category")
+        categories = iter(ivre.db.db.nmap.topvalues("category"))
         category = next(categories)
         self.assertEqual(category["_id"], "TEST")
         self.assertEqual(category["count"], hosts_count)
         with self.assertRaises(StopIteration):
             next(categories)
-        self._check_top_value_api("nmap_topsrv", "service",
+        self._check_top_value_api("nmap_top_service_80", "service:80",
                                   database=ivre.db.db.nmap)
-        self._check_top_value_api("nmap_topsrv_80", "service:80",
+        self._check_top_value_api("nmap_top_product_80", "product:80",
                                   database=ivre.db.db.nmap)
-        self._check_top_value_api("nmap_topprod", "product",
+        self._check_top_value_api("nmap_top_devtype", "devicetype",
                                   database=ivre.db.db.nmap)
-        self._check_top_value_api("nmap_topprod_80", "product:80",
+        self._check_top_value_api("nmap_top_devtype_80", "devicetype:80",
                                   database=ivre.db.db.nmap)
-        self._check_top_value_api("nmap_topdevtype", "devicetype",
+        self._check_top_value_api("nmap_top_domain", "domains",
                                   database=ivre.db.db.nmap)
-        self._check_top_value_api("nmap_topdevtype_80", "devicetype:80",
+        self._check_top_value_api("nmap_top_domain_1", "domains:1",
                                   database=ivre.db.db.nmap)
-        self._check_top_value_api("nmap_topdomain", "domains",
+        self._check_top_value_api("nmap_top_hop", "hop",
                                   database=ivre.db.db.nmap)
-        self._check_top_value_api("nmap_topdomains_1", "domains:1",
-                                  database=ivre.db.db.nmap)
-        self._check_top_value_api("nmap_tophop", "hop",
-                                  database=ivre.db.db.nmap)
-        self._check_top_value_api("nmap_tophop_10+", "hop>10",
+        self._check_top_value_api("nmap_top_hop_10+", "hop>10",
                                   database=ivre.db.db.nmap)
         locations = list(ivre.db.db.nmap.getlocations(
             ivre.db.db.nmap.flt_empty
@@ -1441,9 +1554,9 @@ which `predicate()` is True, given `webflt`.
         self.assertTrue(not err)
         self.check_value("nmap_get_count", int(out))
 
-        addr = next(ivre.db.db.nmap.get(
+        addr = next(iter(ivre.db.db.nmap.get(
             ivre.db.db.nmap.flt_empty
-        ))['addr']
+        )))['addr']
         res, out, err = RUN(["ivre", "scancli", "--host", addr], env=newenv)
         self.assertEqual(res, 0)
         self.assertTrue(not err)
@@ -1459,10 +1572,10 @@ which `predicate()` is True, given `webflt`.
 
     def test_53_nmap_delete(self):
         # Remove
-        addr = next(ivre.db.db.nmap.get(
+        addr = next(iter(ivre.db.db.nmap.get(
             ivre.db.db.nmap.flt_empty,
             sort=[('addr', -1)])
-        )['addr']
+        ))['addr']
         for result in ivre.db.db.nmap.get(
             ivre.db.db.nmap.searchhost(addr)
         ):
@@ -1519,6 +1632,63 @@ which `predicate()` is True, given `webflt`.
         self.assertGreater(total_count, 0)
         self.check_value("passive_count", total_count)
 
+        # MAC addresses
+        ret, out, err = RUN(["ivre", "macinfo", "--count"])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        out = int(out.strip())
+        self.assertGreater(out, 0)
+        self.check_value("passive_count_mac", out)
+        ret, out, err = RUN(["ivre", "macinfo", "-s", "TEST", "--count"])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        out = int(out.strip())
+        self.assertGreater(out, 0)
+        self.check_value("passive_count_mac", out)
+        ret, out, err = RUN(["ivre", "macinfo"])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        out = out.splitlines()
+        self.check_value("passive_count_mac", len(out))
+        out = out[0].split()
+        self.assertEqual(out[1], b'at')
+        self.assertEqual(out[3], b'on')
+        ip_addr = out[0]
+        mac_addr = out[2]
+        ret, out, err = RUN(["ivre", "macinfo", "-r"])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        self.check_value("passive_count_mac", len(out.splitlines()))
+        ret, out, err = RUN(["ivre", "macinfo", ip_addr.decode()])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        self.assertTrue(ip_addr in out)
+        self.assertTrue(mac_addr in out)
+        ret, out, err = RUN(["ivre", "macinfo", mac_addr.decode()])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        self.assertTrue(ip_addr in out)
+        self.assertTrue(mac_addr in out)
+        ret, out, err = RUN(["ivre", "macinfo", ip_addr.decode(),
+                             mac_addr.decode()])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        self.assertTrue(ip_addr in out)
+        self.assertTrue(mac_addr in out)
+        ret, out, err = RUN([
+            "ivre", "macinfo", "%s/24" % ip_addr.decode(),
+            '/^%s:/' % ':'.join(mac_addr.decode().split(':', 4)[:4])
+        ])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        self.assertTrue(ip_addr in out)
+        self.assertTrue(mac_addr in out)
+        # Multicast addresses should not be seen as belonging to hosts
+        ret, out, err = RUN(["ivre", "macinfo", "/^01:/"])
+        self.assertEqual(ret, 0)
+        self.assertTrue(not err)
+        self.assertTrue(not out)
+
         # Filters
         addr = ivre.db.db.passive.get_one(
             ivre.db.db.passive.searchnet('0.0.0.0/0')
@@ -1551,7 +1721,7 @@ which `predicate()` is True, given `webflt`.
 
         addrrange = sorted(
             (
-                ivre.db.db.passive.internal2ip(x)
+                x
                 for x in ivre.db.db.passive.distinct(
                     'addr',
                     flt=ivre.db.db.passive.searchipv4(),
@@ -1569,7 +1739,7 @@ which `predicate()` is True, given `webflt`.
         )
         self.assertGreaterEqual(result, 2)
         addresses_1 = [
-            ivre.db.db.passive.internal2ip(x)
+            x
             for x in ivre.db.db.passive.distinct(
                 'addr',
                 flt=ivre.db.db.passive.searchrange(*addrrange),
@@ -1579,7 +1749,7 @@ which `predicate()` is True, given `webflt`.
         nets = ivre.utils.range2nets(addrrange)
         for net in nets:
             addresses_2 = addresses_2.union(
-                ivre.db.db.passive.internal2ip(x)
+                x
                 for x in ivre.db.db.passive.distinct(
                     "addr",
                     flt=ivre.db.db.passive.searchnet(net),
@@ -1598,7 +1768,7 @@ which `predicate()` is True, given `webflt`.
                     "addr",
                     flt=ivre.db.db.passive.searchnet(net),
             ):
-                addr = ivre.utils.ip2int(ivre.db.db.passive.internal2ip(addr))
+                addr = ivre.utils.ip2int(addr)
                 self.assertTrue(
                     start <= addr <= stop
                 )
@@ -1775,9 +1945,9 @@ which `predicate()` is True, given `webflt`.
 
         # Top values
         for distinct in [True, False]:
-            cur = ivre.db.db.passive.topvalues(field="addr",
-                                               distinct=distinct,
-                                               topnbr=2)
+            cur = iter(ivre.db.db.passive.topvalues(field="addr",
+                                                    distinct=distinct,
+                                                    topnbr=2))
             values = next(cur)
             while values.get('_id') is None:
                 values = next(cur)
@@ -1799,11 +1969,11 @@ which `predicate()` is True, given `webflt`.
                 # JSON fields
                 continue
             for distinct in [True, False]:
-                cur = ivre.db.db.passive.topvalues(
+                cur = iter(ivre.db.db.passive.topvalues(
                     field=field,
                     flt=ivre.db.db.passive.searchja3client(),
                     distinct=distinct,
-                )
+                ))
                 values = next(cur)
                 while values.get('_id') is None:
                     values = next(cur)
@@ -2031,18 +2201,30 @@ which `predicate()` is True, given `webflt`.
 
         # ASNs / Countries / .searchranges()
         for asnum in [15169, 15557, 3215, 2200, 123456789]:
+            if DATABASE == "tinydb" and asnum == 3215:
+                # With tinydb, the filter generates a huge expression
+                # which leads to the following error:
+                #
+                # RecursionError: maximum recursion depth exceeded
+                continue
             res, out, err = RUN(["ivre", "ipinfo", "--count", "--asnum",
                                  str(asnum)])
             self.assertEqual(ret, 0)
             self.assertTrue(not err)
             self.check_value("passive_count_as%d" % asnum, int(out))
         for cname in ['US', 'FR', 'DE', 'KP', 'XX']:
-            if DATABASE == "sqlite" and cname in ['US', 'FR', 'DE']:
+            if DATABASE in ["sqlite", "tinydb"] and \
+               cname in ['US', 'FR', 'DE']:
                 # With sqlite, the filter generates a huge expression
                 # which leads to the following error:
                 #
                 # sqlite3.OperationalError: Expression tree is too
                 # large (maximum depth 10000)
+                #
+                # With tinydb, the filter generates a huge expression
+                # which leads to the following error:
+                #
+                # RecursionError: maximum recursion depth exceeded
                 continue
             res, out, err = RUN(["ivre", "ipinfo", "--count", "--country",
                                  cname])
@@ -2064,6 +2246,28 @@ which `predicate()` is True, given `webflt`.
         self.assertEqual(ret, 0)
         count = sum(1 for _ in out.splitlines())
         self.check_value("passive_iphost_count_com", count)
+
+        req = Request('http://%s:%d/cgi/passivedns/com?subdomains' % (
+            HTTPD_HOSTNAME,
+            HTTPD_PORT,
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEqual(udesc.getcode(), 200)
+        web_count = sum(1 for _ in udesc)
+
+        req = Request('http://%s:%d/cgi/passivedns/com?subdomains&reverse' % (
+            HTTPD_HOSTNAME,
+            HTTPD_PORT,
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEqual(udesc.getcode(), 200)
+        web_count += sum(1 for _ in udesc)
+
+        self.assertEqual(web_count, count)
 
         for tail in ["tail", "tailnew"]:
             ret, out, _ = RUN(["ivre", "ipinfo", "--%s" % tail, "1"])
@@ -2147,6 +2351,9 @@ which `predicate()` is True, given `webflt`.
         self.assertEqual(res, 0)
         self.assertTrue(not out)
 
+        if DATABASE == "tinydb":
+            ivre.db.db.passive.invalidate_cache()
+
         count = ivre.db.db.passive.count(
             ivre.db.db.passive.searchrecontype('DNS_BLACKLIST')
         )
@@ -2165,86 +2372,95 @@ which `predicate()` is True, given `webflt`.
             self.assertTrue(not err)
             self.check_value("passive_count_dnstype_%s" % dnstype, int(out))
 
-        if DATABASE != "sqlite":
+        if DATABASE == "sqlite":
             # BUG in sqlite backend: same bug as "cannot use topvalues
             # with JSON fields"
-            columns, data = ivre.db.db.passive.features(use_service=False)
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value("passive_features_ports_ncolumns", ncolumns)
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_ports_ndata", len(data))
-            columns, data = ivre.db.db.passive.features()
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value("passive_features_services_ncolumns", ncolumns)
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_services_ndata", len(data))
-            columns, data = ivre.db.db.passive.features(use_product=True)
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value("passive_features_products_ncolumns", ncolumns)
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_products_ndata", len(data))
-            columns, data = ivre.db.db.passive.features(use_version=True)
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value("passive_features_versions_ncolumns", ncolumns)
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_versions_ndata", len(data))
-            columns, data = ivre.db.db.passive.features(yieldall=False,
-                                                        use_version=True)
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value("passive_features_versions_noyieldall_ncolumns",
-                             ncolumns)
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_versions_noyieldall_ndata",
-                             len(data))
+            return
 
-            subflts = [(country, ivre.db.db.passive.searchcountry(country))
-                       for country in ['FR', 'DE']]
-            columns, data = ivre.db.db.passive.features(use_service=False,
-                                                        subflts=subflts)
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value("passive_features_ports_FRDE_ncolumns", ncolumns)
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_ports_FRDE_ndata", len(data))
-            columns, data = ivre.db.db.passive.features(subflts=subflts)
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value("passive_features_services_FRDE_ncolumns",
-                             ncolumns)
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_services_FRDE_ndata", len(data))
-            columns, data = ivre.db.db.passive.features(use_product=True,
-                                                        subflts=subflts)
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value("passive_features_products_FRDE_ncolumns",
-                             ncolumns)
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_products_FRDE_ndata", len(data))
-            columns, data = ivre.db.db.passive.features(use_version=True,
-                                                        subflts=subflts)
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value("passive_features_versions_FRDE_ncolumns",
-                             ncolumns)
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_versions_FRDE_ndata", len(data))
-            columns, data = ivre.db.db.passive.features(yieldall=False,
-                                                        use_version=True,
-                                                        subflts=subflts)
-            ncolumns = len(columns)
-            data = list(data)
-            self.check_value(
-                "passive_features_versions_noyieldall_FRDE_ncolumns", ncolumns,
-            )
-            self.assertTrue(all(len(d) == ncolumns for d in data))
-            self.check_value("passive_features_versions_noyieldall_FRDE_ndata",
-                             len(data))
+        columns, data = ivre.db.db.passive.features(use_service=False)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("passive_features_ports_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_ports_ndata", len(data))
+        columns, data = ivre.db.db.passive.features()
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("passive_features_services_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_services_ndata", len(data))
+        columns, data = ivre.db.db.passive.features(use_product=True)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("passive_features_products_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_products_ndata", len(data))
+        columns, data = ivre.db.db.passive.features(use_version=True)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("passive_features_versions_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_versions_ndata", len(data))
+        columns, data = ivre.db.db.passive.features(yieldall=False,
+                                                    use_version=True)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("passive_features_versions_noyieldall_ncolumns",
+                         ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_versions_noyieldall_ndata",
+                         len(data))
+
+        if DATABASE == "tinydb":
+            # BUG in tinydb backend: the country filters generate huge
+            # expressions that cause the error:
+            #
+            # RecursionError: maximum recursion depth exceeded
+            return
+
+        subflts = [(country, ivre.db.db.passive.searchcountry(country))
+                   for country in ['FR', 'DE']]
+        columns, data = ivre.db.db.passive.features(use_service=False,
+                                                    subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("passive_features_ports_FRDE_ncolumns", ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_ports_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.passive.features(subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("passive_features_services_FRDE_ncolumns",
+                         ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_services_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.passive.features(use_product=True,
+                                                    subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("passive_features_products_FRDE_ncolumns",
+                         ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_products_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.passive.features(use_version=True,
+                                                    subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value("passive_features_versions_FRDE_ncolumns",
+                         ncolumns)
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_versions_FRDE_ndata", len(data))
+        columns, data = ivre.db.db.passive.features(yieldall=False,
+                                                    use_version=True,
+                                                    subflts=subflts)
+        ncolumns = len(columns)
+        data = list(data)
+        self.check_value(
+            "passive_features_versions_noyieldall_FRDE_ncolumns", ncolumns,
+        )
+        self.assertTrue(all(len(d) == ncolumns for d in data))
+        self.check_value("passive_features_versions_noyieldall_FRDE_ndata",
+                         len(data))
 
     def test_54_passive_delete(self):
         total_count = ivre.db.db.passive.count(
@@ -2262,6 +2478,84 @@ which `predicate()` is True, given `webflt`.
         self.assertEqual(count + new_count, total_count)
 
     def test_60_flow(self):
+
+        # Unit tests #
+
+        # Test _get_timeslots
+        for i in range(24):
+            # Test both winter and summer times
+            new_duration = 86400
+            test_timeslots = [
+                {
+                    "timeslot": {
+                        "start": datetime(2019, 1, 1, i),
+                        "duration": 3600
+                    },
+                    "expected": {
+                        "start": datetime(2019, 1, 1),
+                        "duration": new_duration
+                    }
+                },
+                {
+                    "timeslot": {
+                        "start": datetime(2019, 6, 1, i),
+                        "duration": 3600
+                    },
+                    "expected": {
+                        "start": datetime(2019, 6, 1),
+                        "duration": new_duration
+                    }
+                }
+            ]
+            for test_timeslot in test_timeslots:
+                timeslot = test_timeslot["timeslot"]
+                new_timeslot = ivre.db.db.flow._get_timeslot(
+                    timeslot["start"], new_duration, 0)
+                self.assertEqual(new_timeslot, test_timeslot["expected"])
+        # Test on one week period, starting monday (changing base)
+        new_duration = 86400 * 7
+        test_timeslots = [
+            {
+                "timeslot": {
+                    "start": datetime(1970, 1, 1),
+                    "duration": 86400
+                },
+                "expected": {
+                    "start": datetime(1969, 12, 29),
+                    "duration": new_duration
+                }
+            },
+            {
+                "timeslot": {
+                    "start": datetime(2019, 7, 15),
+                    "duration": 600
+                },
+                "expected": {
+                    "start": datetime(2019, 7, 15),
+                    "duration": new_duration
+                }
+            },
+            {
+                "timeslot": {
+                    "start": datetime(2019, 7, 21, 23, 50),
+                    "duration": 600,
+                },
+                "expected": {
+                    "start": datetime(2019, 7, 15),
+                    "duration": new_duration
+                }
+            }
+        ]
+        base = ivre.utils.datetime2timestamp(datetime(2019, 7, 15))
+        base += ivre.utils.tz_offset(base)
+        base %= new_duration
+        for test_timeslot in test_timeslots:
+            timeslot = test_timeslot["timeslot"]
+            new_timeslot = ivre.db.db.flow._get_timeslot(
+                timeslot["start"], new_duration, base)
+            self.assertEqual(new_timeslot, test_timeslot["expected"])
+
+        #  Functional tests #
 
         # Init DB
         res, out, err = RUN(["ivre", "flowcli", "--init"],
@@ -2345,9 +2639,56 @@ which `predicate()` is True, given `webflt`.
             {"edges": ["dport = 80"]})
         self.check_flow_count_value(
             "flow_count_sport_49268",
-            {"edges": ["sport = 49268"]},
-            ["--flow-filters", "sport = 49268"],
-            {"edges": ["sport = 49268"]})
+            {"edges": ["ANY sports = 49268"]},
+            ["--flow-filters", "ANY sports = 49268"],
+            {"edges": ["ANY sports = 49268"]})
+
+        # Test cli shortcut
+
+        self.check_flow_count_value_cli(
+            "flow_count_192.168.122.214",
+            ["--host", "192.168.122.214"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_src_95.136.242.99",
+            ["--src", "95.136.242.99"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_dst_95.136.242.99",
+            ["--dst", "95.136.242.99"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_dport_80",
+            ["--port", "80"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_dport_80",
+            ["--dport", "80"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_sport_49268",
+            ["--sport", "49268"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_tcp",
+            ["--tcp"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_tcp",
+            ["--proto", "tcp"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_udp",
+            ["--udp"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_udp",
+            ["--proto", "udp"],
+            command="flowcli")
+        self.check_flow_count_value_cli(
+            "flow_count_icmp",
+            ["--proto", "icmp"],
+            command="flowcli")
 
         # Time precision in mongo is millisecond, whereas it is microsecond in
         # Neo4j. Thus, we can't have the same results.
@@ -2361,7 +2702,7 @@ which `predicate()` is True, given `webflt`.
         lastseen_date = self.get_timezone_fmt_date(
             "2015-09-18 14:15:19.949904")
         self.check_flow_count_value(
-            "flow_count_lastseen_%s" % DATABASE,
+            "flow_count_lastseen",
             {"edges": ["lastseen = %s" % lastseen_date]},
             ["--flow-filters", "lastseen = %s" % lastseen_date],
             {"edges": ["lastseen = %s" % lastseen_date]})
@@ -2502,7 +2843,40 @@ which `predicate()` is True, given `webflt`.
                 self.check_value("flow_daily_%d_flows_%s"
                                  % (i, flw[0]), flw[1])
 
+        # Test top values
+        self.check_flow_top_values(
+            "flow_top_flows",
+            ['src.addr', 'dst.addr', 'proto', 'dport'],
+            sum_fields=['count'],
+            collect_fields=['firstseen', 'lastseen'],
+            test_api=False)
+
+        self.check_flow_top_values(
+            "flow_top_pair",
+            ['src.addr', 'dst.addr'],
+            sum_fields=['scbytes', 'csbytes'],
+            collect_fields=['proto', 'dport', 'sports'])
+
+        self.check_flow_top_values(
+            "flow_top_transport",
+            ['proto', 'dport'],
+            sum_fields=['scbytes', 'csbytes'],
+            collect_fields=['src.addr', 'dst.addr'])
+
         if DATABASE == 'mongo':
+            # More top values test
+            self.check_flow_top_values(
+                "flow_top_sport",
+                ['sport'])
+            self.check_flow_top_values(
+                "flow_top_sport",
+                ['sports'])
+            self.check_flow_top_values(
+                "flow_top_times_start",
+                ['times'],
+                collect_fields=['src.addr', 'dst.addr', 'proto', 'dport',
+                                'sport'])
+
             self.check_flow_count_value(
                 "flow_count_http",
                 {"edges": ['meta.http']},
@@ -2520,12 +2894,16 @@ which `predicate()` is True, given `webflt`.
                 {"nodes": ['addr =~ 10.0.0.0/8']},
                 ['--node-filters', "addr =~ 10.0.0.0/8"],
                 {"nodes": ["addr =~ 10.0.0.0/8"]})
+            self.check_flow_count_value_cli(
+                "flow_count_10.0.0.0/8",
+                ['--host', "10.0.0.0/8"],
+                command="flowcli")
             # Test flow data
             flt = ivre.db.db.flow.from_filters({
                 "nodes": [],
                 "edges": ["meta.sip"]
             })
-            elt = next(ivre.db.db.flow.get(flt, orderby='src', limit=1))
+            elt = next(iter(ivre.db.db.flow.get(flt, orderby='src', limit=1)))
             del elt['_id']
             # Format datetime fields in ISO format
             for field in ivre.db.db.flow.datefields:
@@ -2554,24 +2932,80 @@ which `predicate()` is True, given `webflt`.
                 ['--flow-filters', 'LEN times > 2'],
                 {"edges": ['LEN times > 2']})
 
-        # Test top values
-        self.check_flow_top_values(
-            "flow_top_flows",
-            ["ivre", "flowcli", "--top", "src.addr", "dst.addr", "proto",
-             "dport", "--limit", "1", "--sum", "count", "--collect",
-             "firstseen", "lastseen"])
+            # Test after and before filters
+            self.check_flow_count_value_cli(
+                "flow_count_before_2015",
+                ['-b', "2015-01-01 00:00"],
+                "flowcli")
+            self.check_flow_count_value_cli(
+                "flow_count_after_2015",
+                ['-a', "2015-01-01 00:00"],
+                "flowcli")
+            self.check_flow_count_value_cli(
+                "flow_count_in_2015",
+                ["-a", "2015-01-01 00:00", "-b", "2016-01-01 00:00"],
+                "flowcli")
 
-        self.check_flow_top_values(
-            "flow_top_pair",
-            ['ivre', 'flowcli', '--top', 'src.addr', 'dst.addr', '--sum',
-             'scbytes', 'csbytes', '--limit', '1', '--collect', 'proto',
-             'dport'])
+            # Test precision
+            res, out, err = RUN(['ivre', 'flowcli', '--precision'])
+            self.assertEqual(res, 0)
+            self.assertTrue(not err)
+            numbers = out.decode().split('\n')[:-1]
+            self.assertEqual(len(numbers), 1)
+            self.assertEqual(int(numbers[0]), ivre.config.FLOW_TIME_PRECISION)
 
-        self.check_flow_top_values(
-            "flow_top_transport",
-            ['ivre', 'flowcli', '--top', 'proto', 'dport', '--sum',
-             'scbytes', 'csbytes', '--limit', '1', '--collect', 'src.addr',
-             'dst.addr'])
+            self.check_flow_count_value_cli(
+                "flow_count",
+                ['--precision', str(ivre.config.FLOW_TIME_PRECISION)],
+                "flowcli")
+
+            # Test to reduce precision
+            new_precision = ivre.config.FLOW_TIME_PRECISION * 4
+            res, out, err = RUN(['ivre', 'flowcli', '--reduce-precision',
+                                 str(new_precision)],
+                                stdin=open(os.devnull))
+            self.assertEqual(res, 0)
+
+            for i in range(1, 3):
+                self.check_flow_count_value(
+                    "flow_count_timeslots_after_reducing_%d" % i,
+                    {"edges": ['LEN times = %d' % i]},
+                    ['--flow-filters', 'LEN times = %d' % i],
+                    {"edges": ['LEN times = %d' % i]})
+            self.check_flow_count_value(
+                "flow_count_timeslots_after_reducing_gt_2",
+                {"edges": ['LEN times > 2']},
+                ['--flow-filters', 'LEN times > 2'],
+                {"edges": ['LEN times > 2']})
+
+            flt_old = ivre.db.db.flow.from_filters({
+                'edges': [
+                    'times.duration = %d' % ivre.config.FLOW_TIME_PRECISION
+                ]
+            })
+            self.assertEqual(
+                ivre.db.db.flow.count(flt_old),
+                {'clients': 0, 'flows': 0, 'servers': 0}
+            )
+            flt_new = ivre.db.db.flow.from_filters({
+                'edges': [
+                    'times.duration = %d' % new_precision
+                ]
+            })
+            self.assertNotEqual(
+                ivre.db.db.flow.count(flt_new),
+                {'clients': 0, 'flows': 0, 'servers': 0}
+            )
+        # Test flow cleanup
+        res, out, err = RUN(["ivre", "flowcli", "--init"],
+                            stdin=open(os.devnull))
+        self.assertEqual(res, 0)
+        self.assertTrue(not err)
+        res, out, err = RUN(['ivre', 'bro2db', os.path.join(os.getcwd(),
+                             "samples", "mongo_conn.log")])
+        self.assertEqual(res, 0)
+        self.assertTrue(not out)
+        self.check_flow_count_value("flow_count_cleanup", {}, [], None)
 
         # Test netflow capture insertion
         res, out, err = RUN(["ivre", "flowcli", "--init"],
@@ -2582,7 +3016,34 @@ which `predicate()` is True, given `webflt`.
         res, out, err = RUN(['ivre', 'flow2db',
                              os.path.join(os.getcwd(), "samples", "nfcapd")])
         self.assertEqual(res, 0)
+        if DATABASE == "tinydb":
+            ivre.db.db.flow.invalidate_cache()
+            self.restart_web_server()
         self.check_flow_count_value("flow_count_netflow", {}, [], None)
+
+        # Test fields option
+        res, out, err = RUN(["ivre", "flowcli", "--fields"])
+        self.assertEqual(res, 0)
+        self.assertTrue(out)
+
+        # Test invalid fields
+        res, out, err = RUN(["ivre", "flowcli", "-f", "toto"])
+        self.assertTrue(err)
+        self.assertNotEqual(res, 0)
+        res, out, err = RUN(["ivre", "flowcli", "--fields", "toto"])
+        self.assertTrue(err)
+        self.assertNotEqual(res, 0)
+        res, out, err = RUN(["ivre", "flowcli", "--top", "toto"])
+        self.assertTrue(err)
+        self.assertNotEqual(res, 0)
+        res, out, err = RUN(["ivre", "flowcli", "--top", "src.addr",
+                             "--collect", "toto"])
+        self.assertTrue(err)
+        self.assertNotEqual(res, 0)
+        res, out, err = RUN(["ivre", "flowcli", "--top", "src.addr",
+                             "--count", "toto"])
+        self.assertTrue(err)
+        self.assertNotEqual(res, 0)
 
     # This test have to be done first.
     def test_10_data(self):
@@ -2639,6 +3100,13 @@ which `predicate()` is True, given `webflt`.
     registered_country_name United States
     coordinates (37.751, -97.822)
     coordinates_accuracy_radius 1000
+'''.splitlines()))
+
+        res, out, _ = RUN(["ivre", "ipdata", "10.0.0.1"])
+        self.assertEqual(res, 0)
+        out = sorted(out.splitlines())
+        self.assertEqual(out, sorted(b'''10.0.0.1
+    address_type Private
 '''.splitlines()))
 
         res, out, _ = RUN(["ivre", "runscans", "--output", "Count",
@@ -2727,7 +3195,7 @@ which `predicate()` is True, given `webflt`.
         """Functions that have not yet been tested"""
 
         self.assertIsNotNone(ivre.config.guess_prefix())
-        self.assertIsNone(ivre.config.guess_prefix("inexistant"))
+        self.assertIsNone(ivre.config.guess_prefix("inexistent"))
 
         # Version / help
         res, out1, err = RUN(["ivre"])
@@ -2740,7 +3208,7 @@ which `predicate()` is True, given `webflt`.
         res, _, err = RUN(["ivre", "version"])
         self.assertEqual(res, 0)
         self.assertTrue(not err)
-        res, _, _ = RUN(["ivre", "inexistant"])
+        res, _, _ = RUN(["ivre", "inexistent"])
         self.assertTrue(res)
 
         # IP addresses manipulation utils
@@ -3138,6 +3606,32 @@ which `predicate()` is True, given `webflt`.
                 self.assertTrue(match)
                 self.assertEqual(len(match.groups()), 2)
                 self.assertEqual(match.groups(), tuple(naddr.split('/')))
+        for mac, res in [
+                ("00:00:00:00:00:00",
+                 ('00:00:00',
+                  'Officially Xerox, but 0:0:0:0:0:0 is more common')),
+                ('00:00:01:00:00:00', ('Xerox', 'Xerox Corporation')),
+                ('00:01:01:00:00:00', ('Private', None)),
+                ('01:00:00:00:00:00', None),
+        ]:
+            self.assertEqual(ivre.utils.mac2manuf(mac), res)
+
+        # Banner "canonicalization"
+        for expr, result in ivre.passive.TCP_SERVER_PATTERNS:
+            if not isinstance(result, bytes):
+                # Not tested yet
+                continue
+            if b'\\1' in result or b'\\g<' in result:
+                # Not tested yet
+                continue
+            # The substitution must match the pattern.
+            self.assertTrue(expr.search(result) is not None)
+            # The transformation must leave the result expression
+            # unchanged.
+            self.assertEqual(
+                expr.sub(result, result),
+                result
+            )
 
     def test_scans(self):
         "Run scans, with and without agents"
@@ -3346,12 +3840,54 @@ which `predicate()` is True, given `webflt`.
         for dirname in ['scans', 'tmp']:
             shutil.rmtree(dirname)
 
+        # Screenshots: this tests the http-screenshot script
+        # (including phantomjs) and IVRE's ability to read
+        # screenshots (including extracting words with tesseract)
+        ipaddr = socket.gethostbyname('ivre.rocks')
+        with AgentScanner(self, nmap_template="http") as agent:
+            agent.scan(['--net', '%s/32' % ipaddr])
+        data_files, up_files = (
+            glob("%s.%s*" % (os.path.join('output', 'MISC', subdir,
+                                          '*', *ipaddr.split('.')), ext))
+            for subdir, ext in [('data', 'tar'), ('up', 'xml')]
+        )
+        self.assertEqual(len(data_files), 1)
+        self.assertTrue(os.path.exists(data_files[0]))
+        self.assertEqual(len(up_files), 1)
+        self.assertTrue(os.path.exists(up_files[0]))
+        # TarFile object does not implement __exit__ on Python 2.6,
+        # cannot use `with`
+        data_archive = tarfile.open(data_files[0])
+        data_archive.extractall()
+        data_archive.close()
+        self.assertTrue(os.path.exists('screenshot-%s-80.jpg' % ipaddr))
+        res, out, _ = RUN(["ivre", "scan2db", "--test"] + up_files)
+        self.assertEqual(res, 0)
+
+        def _json_loads(data, deflt=None):
+            try:
+                return json.loads(data.decode())
+            except ValueError:
+                return deflt
+        screenshots_count = sum(bool(port.get('screendata'))
+                                for line in out.splitlines()
+                                for host in _json_loads(line, [])
+                                for port in host.get('ports', []))
+        self.assertEqual(screenshots_count, 1)
+        screenwords = set(word for line in out.splitlines()
+                          for host in _json_loads(line, [])
+                          for port in host.get('ports', [])
+                          for word in port.get('screenwords', []))
+        self.assertTrue('IVRE' in screenwords)
+        shutil.rmtree('output')
+
     def test_50_view(self):
 
         #
         # Web server tests
         #
 
+        print('Web server tests')
         # Test invalid Referer: header values
         #   no header
         req = Request('http://%s:%d/cgi/config' % (HTTPD_HOSTNAME, HTTPD_PORT))
@@ -3412,6 +3948,7 @@ which `predicate()` is True, given `webflt`.
                 break
         self.assertTrue(result)
 
+        print('Init DB & inserts')
         # Init DB
         self.assertEqual(RUN(["ivre", "view", "--init"],
                              stdin=open(os.devnull))[0], 0)
@@ -3427,9 +3964,29 @@ which `predicate()` is True, given `webflt`.
         # One entry in test should actually be one entry at the end.
         self.check_value("view_count_active", len(out.splitlines()))
 
+        # Test passive filters
+        # FIXME : positionnal IP filter is broken
+        # ret, out, _ = RUN(["ivre", "db2view", "--test", "passive",
+        #                    "10.0.0.1"])
+        ret, out, _ = RUN(["ivre", "db2view", "--test", "passive",
+                           "--net", "192.168.0.0/16"])
+        self.assertEqual(ret, 0)
+        self.check_value("view_test_network", len(out.splitlines()))
+        ret, out, _ = RUN(["ivre", "db2view", "--test", "passive",
+                           "--range", "192.168.0.0", "192.168.255.255"])
+        self.assertEqual(ret, 0)
+        self.check_value("view_test_range", len(out.splitlines()))
+        ret, out, _ = RUN(["ivre", "db2view", "--test", "passive", "--host",
+                           "10.0.0.1"])
+        self.assertEqual(ret, 0)
+        self.assertEqual(len(out.splitlines()), 1)
+
+        print('Counting')
         view_count = 0
         # Count passive results
         self.assertEqual(RUN(["ivre", "db2view", "passive"])[0], 0)
+        if DATABASE == 'elastic':
+            time.sleep(ELASTIC_INSERT_TEMPO)
         ret, out, _ = RUN(["ivre", "view", "--count"])
         self.assertEqual(ret, 0)
         view_count = int(out)
@@ -3439,33 +3996,34 @@ which `predicate()` is True, given `webflt`.
                              stdin=open(os.devnull))[0], 0)
         # Count active results
         self.assertEqual(RUN(["ivre", "db2view", "nmap"])[0], 0)
+        if DATABASE == 'elastic':
+            time.sleep(ELASTIC_INSERT_TEMPO)
         ret, out, _ = RUN(["ivre", "view", "--count"])
         self.assertEqual(ret, 0)
         view_count = int(out)
         self.assertGreater(view_count, 0)
         self.check_value("view_count_active", view_count)
         # Count merged results
-        self.assertEqual(RUN(["ivre", "db2view", "passive"])[0], 0)
+        self.assertEqual(RUN(["ivre", "db2view", "--view-category", "PASSIVE",
+                              "passive"])[0], 0)
+        if DATABASE == 'elastic':
+            time.sleep(ELASTIC_INSERT_TEMPO)
         ret, out, _ = RUN(["ivre", "view", "--count"])
         self.assertEqual(ret, 0)
         view_count = int(out)
         self.assertGreater(view_count, 0)
         self.check_value("view_count_total", view_count)
-        view_count = self.check_view_count_value("view_get_count",
+        view_count = self.check_view_count_value("view_count_total",
                                                  ivre.db.db.view.flt_empty,
                                                  [], None)
         ret, out, err = RUN(["ivre", "view"])
         self.assertEqual(ret, 0)
         self.assertTrue(not err)
 
+        print('Outputs')
         # JSON
         ret, out, err = RUN(["ivre", "view", "--json"])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
-        self.assertEqual(len(out.splitlines()), view_count)
-        # SHORT
-        res, out, err = RUN(['ivre', 'view', '--short'])
-        self.assertEqual(res, 0)
         self.assertTrue(not err)
         self.assertEqual(len(out.splitlines()), view_count)
         # GNMAP
@@ -3474,79 +4032,128 @@ which `predicate()` is True, given `webflt`.
         self.assertTrue(not err)
         count = sum(1 for line in out.splitlines() if b'Status: Up' in line)
         self.check_value("view_gnmap_up_count", count)
+        # SHORT
+        res, out, err = RUN(['ivre', 'view', '--short'])
+        self.assertEqual(res, 0)
+        self.assertTrue(not err)
+        self.assertEqual(len(out.splitlines()), view_count)
 
-        # Filters
-        self.check_view_top_value("view_ssh_top_port", "port:ssh")
-        self.check_view_top_value("view_http_top_content_type",
-                                  "httphdr:content-type")
-        self.check_view_top_value("view_http_top_header", "httphdr.name")
-        self.check_view_top_value("view_http_top_header_value",
+        res, out, _ = RUN(["ivre", "view", "--count", "--category", "PASSIVE"])
+        self.assertEqual(res, 0)
+        self.check_value("view_count_passive", int(out))
+
+        print('Top values')
+        # Top values & filters
+        self.assertEqual(
+            next(iter(ivre.db.db.view.topvalues("category")))['_id'],
+            "TEST",
+        )
+        self.check_view_top_value("view_top_ssh_port", "port:ssh")
+        self.check_view_top_value("view_top_http_header", "httphdr.name")
+        self.check_view_top_value("view_top_http_header_value",
                                   "httphdr.value")
-        self.check_view_top_value("view_http_top_ua", "useragent")
-        self.check_view_top_value("view_http_top_ua_curl", "useragent:/^curl/")
+        self.check_view_top_value("view_top_http_content_type",
+                                  "httphdr:content-type")
+        self.check_view_top_value("view_top_http_ua", "useragent")
+        self.check_view_top_value("view_top_http_ua_curl", "useragent:/^curl/")
 
-        self.check_view_top_value("view_ssl_top_ja3cli_md5", "ja3-client")
-        self.check_view_top_value("view_ssl_top_ja3cli_md5", "ja3-client.md5")
-        self.check_view_top_value("view_ssl_top_ja3cli_sha1",
+        self.check_view_top_value("view_top_ssl_ja3cli_md5", "ja3-client")
+        self.check_view_top_value("view_top_ssl_ja3cli_md5", "ja3-client.md5")
+        self.check_view_top_value("view_top_ssl_ja3cli_sha1",
                                   "ja3-client.sha1")
-        self.check_view_top_value("view_ssl_top_ja3cli_sha256",
+        self.check_view_top_value("view_top_ssl_ja3cli_sha256",
                                   "ja3-client.sha256")
-        self.check_view_top_value("view_ssl_top_ja3cli_raw", "ja3-client.raw")
-        self.check_view_top_value("view_ssl_top_ja3cli_md5_771",
+        self.check_view_top_value("view_top_ssl_ja3cli_raw", "ja3-client.raw")
+        self.check_view_top_value("view_top_ssl_ja3cli_md5_771",
                                   "ja3-client:/^771/")
-        self.check_view_top_value("view_ssl_top_ja3cli_md5_771",
+        self.check_view_top_value("view_top_ssl_ja3cli_md5_771",
                                   "ja3-client.md5:/^771/")
-        self.check_view_top_value("view_ssl_top_ja3cli_sha1_771",
+        self.check_view_top_value("view_top_ssl_ja3cli_sha1_771",
                                   "ja3-client.sha1:/^771/")
-        self.check_view_top_value("view_ssl_top_ja3cli_sha256_771",
+        self.check_view_top_value("view_top_ssl_ja3cli_sha256_771",
                                   "ja3-client.sha256:/^771/")
-        self.check_view_top_value("view_ssl_top_ja3cli_raw_771",
+        self.check_view_top_value("view_top_ssl_ja3cli_raw_771",
                                   "ja3-client.raw:/^771/")
-
-        self.check_view_top_value("view_ssl_top_ja3srv_md5", "ja3-server")
-        self.check_view_top_value("view_ssl_top_ja3srv_md5", "ja3-server.md5")
-        self.check_view_top_value("view_ssl_top_ja3srv_sha1",
+        self.check_view_top_value("view_top_ssl_ja3srv_md5", "ja3-server")
+        self.check_view_top_value("view_top_ssl_ja3srv_md5", "ja3-server.md5")
+        self.check_view_top_value("view_top_ssl_ja3srv_sha1",
                                   "ja3-server.sha1")
-        self.check_view_top_value("view_ssl_top_ja3srv_sha256",
+        self.check_view_top_value("view_top_ssl_ja3srv_sha256",
                                   "ja3-server.sha256")
-        self.check_view_top_value("view_ssl_top_ja3srv_raw", "ja3-server.raw")
-        self.check_view_top_value("view_ssl_top_ja3srv_md5_769",
+        self.check_view_top_value("view_top_ssl_ja3srv_raw", "ja3-server.raw")
+        self.check_view_top_value("view_top_ssl_ja3srv_md5_769",
                                   "ja3-server:/^769/")
-        self.check_view_top_value("view_ssl_top_ja3srv_md5_769",
+        self.check_view_top_value("view_top_ssl_ja3srv_md5_769",
                                   "ja3-server.md5:/^769/")
-        self.check_view_top_value("view_ssl_top_ja3srv_sha1_769",
+        self.check_view_top_value("view_top_ssl_ja3srv_sha1_769",
                                   "ja3-server.sha1:/^769/")
-        self.check_view_top_value("view_ssl_top_ja3srv_sha256_769",
+        self.check_view_top_value("view_top_ssl_ja3srv_sha256_769",
                                   "ja3-server.sha256:/^769/")
-        self.check_view_top_value("view_ssl_top_ja3srv_raw_769",
+        self.check_view_top_value("view_top_ssl_ja3srv_raw_769",
                                   "ja3-server.raw:/^769/")
-        self.check_view_top_value("view_ssl_top_ja3srv_md5_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_md5_771",
                                   "ja3-server::/^771/")
-        self.check_view_top_value("view_ssl_top_ja3srv_md5_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_md5_771",
                                   "ja3-server.md5::/^771/")
-        self.check_view_top_value("view_ssl_top_ja3srv_sha1_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_sha1_771",
                                   "ja3-server.sha1::/^771/")
-        self.check_view_top_value("view_ssl_top_ja3srv_sha256_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_sha256_771",
                                   "ja3-server.sha256::/^771/")
-        self.check_view_top_value("view_ssl_top_ja3srv_raw_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_raw_771",
                                   "ja3-server.raw::/^771/")
-        self.check_view_top_value("view_ssl_top_ja3srv_md5_769_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_md5_769_771",
                                   "ja3-server:/^769/:/^771/")
-        self.check_view_top_value("view_ssl_top_ja3srv_md5_769_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_md5_769_771",
                                   "ja3-server.md5:/^769/:/^771/")
-        self.check_view_top_value("view_ssl_top_ja3srv_sha1_769_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_sha1_769_771",
                                   "ja3-server.sha1:/^769/:/^771/")
-        self.check_view_top_value("view_ssl_top_ja3srv_sha256_769_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_sha256_769_771",
                                   "ja3-server.sha256:/^769/:/^771/")
-        self.check_view_top_value("view_ssl_top_ja3srv_raw_769_771",
+        self.check_view_top_value("view_top_ssl_ja3srv_raw_769_771",
                                   "ja3-server.raw:/^769/:/^771/")
 
         self.check_view_top_value("view_top_s7_module_name", "s7.module_name")
         self.check_view_top_value("view_top_s7_plant", "s7.plant")
-        self.check_view_top_value("view_top_isotsap_product",
+        self.check_view_top_value("view_top_service", "service")
+        self.check_view_top_value("view_top_service_80", "service:80")
+        self.check_view_top_value("view_top_product", "product")
+        self.check_view_top_value("view_top_product_http", "product:http")
+        self.check_view_top_value("view_top_product_isotsap",
                                   "product:iso-tsap")
+        self.check_view_top_value("view_top_product_80", "product:80")
+        self.check_view_top_value("view_top_version", "version")
+        self.check_view_top_value("view_top_version_http", "version:http")
+        self.check_view_top_value("view_top_version_http_apache",
+                                  "version:http:Apache httpd")
+
+        if DATABASE == "elastic":
+            # Support for Elasticsearch is experimental and lacks a
+            # lot of functionalities. The next tests will fail for
+            # lack of filters & topvalues.
+            return
+
         self.check_view_top_value("view_top_cert_issuer", "cert.issuer")
         self.check_view_top_value("view_top_cert_subject", "cert.subject")
+        for hashtype in ['md5', 'sha1', 'sha256']:
+            self.check_view_top_value("view_top_cert_%s" % hashtype,
+                                      "cert.%s" % hashtype)
+            for val in self._sort_top_values(
+                    ivre.db.db.view.topvalues('cert.%s' % hashtype)
+            ):
+                for host in ivre.db.db.view.get(
+                        ivre.db.db.view.searchcert(**{hashtype: val})
+                ):
+                    found = False
+                    for port in host['ports']:
+                        for script in port.get('scripts', []):
+                            if script['id'] == 'ssl-cert' and script.get(
+                                    'ssl-cert', {}
+                            ).get(hashtype) == val:
+                                found = True
+                                break
+                        if found:
+                            break
+                    self.assertTrue(found)
         self.check_view_top_value("view_top_filename", "file")
         self.check_view_top_value("view_top_filename", "file.filename")
         self.check_view_top_value("view_top_anonftp_filename", "file:ftp-anon")
@@ -3555,26 +4162,20 @@ which `predicate()` is True, given `webflt`.
         self.check_view_top_value("view_top_uids", "file.uid")
         self.check_view_top_value("view_top_modbus_deviceids",
                                   "modbus.deviceid")
-        self.check_view_top_value("view_top_services", "service")
-        self.check_view_top_value("view_top_product", "product")
-        self.check_view_top_value("view_top_product_http", "product:http")
-        self.check_view_top_value("view_top_version", "version")
-        self.check_view_top_value("view_top_version_http", "version:http")
-        self.check_view_top_value("view_top_version_http_apache",
-                                  "version:http:Apache httpd")
-        categories = ivre.db.db.view.topvalues("category")
-        category = next(categories)
-        self.assertEqual(category["_id"], "TEST")
-        self.check_view_top_value("view_topsrv", "service")
-        self.check_view_top_value("view_topsrv_80", "service:80")
-        self.check_view_top_value("view_topprod", "product")
-        self.check_view_top_value("view_topprod_80", "product:80")
-        self.check_view_top_value("view_topdevtype", "devicetype")
-        self.check_view_top_value("view_topdevtype_80", "devicetype:80")
-        self.check_view_top_value("view_topdomain", "domains")
-        self.check_view_top_value("view_topdomains_1", "domains:1")
-        self.check_view_top_value("view_tophop", "hop")
-        self.check_view_top_value("view_tophop_10+", "hop>10")
+        self.check_view_top_value("view_top_devtype", "devicetype")
+        self.check_view_top_value("view_top_devtype_80", "devicetype:80")
+        self.check_view_top_value("view_top_domain", "domains")
+        self.check_view_top_value("view_top_domain_1", "domains:1")
+        self.check_view_top_value("view_top_hop", "hop")
+        self.check_view_top_value("view_top_hop_10+", "hop>10")
+
+        print('Filters')
+        # Check schema version
+        self.check_count_value_api(
+            view_count,
+            ivre.db.db.view.searchversion(ivre.xmlnmap.SCHEMA_VERSION),
+            database=ivre.db.db.view,
+        )
 
         # Check script search filter
         count = self.check_view_count_value(
@@ -3600,10 +4201,11 @@ which `predicate()` is True, given `webflt`.
             "torcert",
         )
 
+        print('Web /view URLs')
         # Check Web /view
-        addr = next(ivre.db.db.view.get(
+        addr = next(iter(ivre.db.db.view.get(
             ivre.db.db.view.flt_empty, fields=['addr']
-        ))['addr']
+        )))['addr']
         addr_i = ivre.utils.force_ip2int(addr)
         addr = ivre.utils.force_int2ip(addr)
         addr_net = '.'.join(addr.split('.')[:3]) + '.0/24'
@@ -3725,9 +4327,9 @@ which `predicate()` is True, given `webflt`.
         self.assertTrue(addr_i in
                         (x[0] for x in json.loads(udesc.read().decode())))
         # coordinates
-        result = next(ivre.db.db.view.get(
+        result = next(iter(ivre.db.db.view.get(
             ivre.db.db.view.searchcity(re.compile('.'))
-        ))
+        )))
         addr = ivre.utils.force_int2ip(result['addr'])
         addr_net = '.'.join(addr.split('.')[:3]) + '.0/24'
         coords = result['infos']['coordinates']
@@ -3768,6 +4370,7 @@ which `predicate()` is True, given `webflt`.
             )
         ))
 
+        print('JA3 & UA filters')
         # Check ja3 filters
         self.check_view_count_value(
             "view_count_ja3_server",
@@ -3851,6 +4454,7 @@ which `predicate()` is True, given `webflt`.
             "useragent:%s" % regexp,
         )
 
+        print('Features')
         columns, data = ivre.db.db.view.features(use_service=False)
         ncolumns = len(columns)
         data = list(data)
@@ -3939,11 +4543,11 @@ which `predicate()` is True, given `webflt`.
         res, out, err = RUN(["ivre", "view", "--count"], env=newenv)
         self.assertEqual(res, 0)
         self.assertTrue(not err)
-        self.check_value("view_get_count", int(out))
+        self.check_value("view_count_total", int(out))
 
-        addr = next(ivre.db.db.view.get(
+        addr = next(iter(ivre.db.db.view.get(
             ivre.db.db.view.flt_empty
-        ))['addr']
+        )))['addr']
         res, out, err = RUN(["ivre", "view", "--host", addr], env=newenv)
         self.assertEqual(res, 0)
         self.assertTrue(not err)
@@ -3994,8 +4598,11 @@ DATABASES = {
                "utils"],
     "neo4j": ["30_nmap", "40_passive", "50_view", "53_nmap_delete",
               "54_passive_delete", "90_cleanup", "scans", "utils"],
+    "elastic": ["30_nmap", "40_passive", "53_nmap_delete", "54_passive_delete",
+                "60_flow", "90_cleanup", "scans", "utils"],
     "maxmind": ["30_nmap", "40_passive", "50_view", "53_nmap_delete",
                 "54_passive_delete", "60_flow", "90_cleanup", "scans"],
+    "tinydb": ["utils"],
 }
 
 
@@ -4050,7 +4657,7 @@ def parse_args():
 
 
 def parse_env():
-    global DATABASE
+    global DATABASE, ELASTIC_INSERT_TEMPO
     DATABASE = os.getenv("DB")
     for test in DATABASES.get(DATABASE, []):
         test = "test_%s" % test
@@ -4061,6 +4668,9 @@ def parse_env():
                 getattr(IvreTests, test),
             ),
         )
+    # Elasticsearch insertion is asynchronous, this hack "ensures" the
+    # data has been inserted before continuing.
+    ELASTIC_INSERT_TEMPO = int(os.getenv("ES_INSERT_TEMPO", 1))
 
 
 if __name__ == '__main__':

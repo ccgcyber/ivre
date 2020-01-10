@@ -1,5 +1,5 @@
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -52,14 +52,16 @@ export {
         POP_SERVER,
         TCP_CLIENT_BANNER,
         TCP_SERVER_BANNER,
+        OPEN_PORT,
         P0F,
+        MAC_ADDRESS,
     };
 
     type Info: record {
         ## The time at which the software was detected.
         ts: time &log;
         ## The connection uid
-        uid: string &log;
+        uid: string &log &optional;
         ## The IP address detected running the software.
         host: addr &log &optional;
         ## The service port
@@ -120,8 +122,9 @@ export {
     # Ignore SSL/TLS client hello messages (from
     # scripts/base/protocols/ssl/dpd.sig), HTTP requests (from
     # scripts/base/protocols/http/dpd.sig) and SSH banners (from
-    # scripts/base/protocols/ssh/dpd.sig)
-    const TCP_CLIENT_BANNER_IGNORE: pattern = /^(\x16\x03[\x00\x01\x02\x03]..\x01...\x03[\x00\x01\x02\x03]|...?\x01[\x00\x03][\x00\x01\x02\x03\x04]|\x16\xfe[\xff\xfd]\x00\x00\x00\x00\x00\x00\x00...\x01...........\xfe[\xff\xfd]|[[:space:]]*(OPTIONS|GET|HEAD|POST|PUT|DELETE|TRACE|CONNECT|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|VERSION-CONTROL|REPORT|CHECKOUT|CHECKIN|UNCHECKOUT|MKWORKSPACE|UPDATE|LABEL|MERGE|BASELINE-CONTROL|MKACTIVITY|ORDERPATCH|ACL|PATCH|SEARCH|BCOPY|BDELETE|BMOVE|BPROPFIND|BPROPPATCH|NOTIFY|POLL|SUBSCRIBE|UNSUBSCRIBE|X-MS-ENUMATTS|RPC_OUT_DATA|RPC_IN_DATA)[[:space:]]*|[sS][sS][hH]-[12]\.)/;
+    # scripts/base/protocols/ssh/dpd.sig). "." must be replaced by
+    # "[\x00-\xFF]" since the 's' flag does not seem to be supported.
+    const TCP_CLIENT_BANNER_IGNORE: pattern = /^(\x16\x03[\x00\x01\x02\x03][\x00-\xFF][\x00-\xFF]\x01[\x00-\xFF][\x00-\xFF][\x00-\xFF]\x03[\x00\x01\x02\x03]|[\x00-\xFF][\x00-\xFF][\x00-\xFF]?\x01[\x00\x03][\x00\x01\x02\x03\x04]|\x16\xfe[\xff\xfd]\x00\x00\x00\x00\x00\x00\x00[\x00-\xFF][\x00-\xFF][\x00-\xFF]\x01[\x00-\xFF][\x00-\xFF][\x00-\xFF][\x00-\xFF][\x00-\xFF][\x00-\xFF][\x00-\xFF][\x00-\xFF][\x00-\xFF][\x00-\xFF][\x00-\xFF]\xfe[\xff\xfd]|[[:space:]]*(OPTIONS|GET|HEAD|POST|PUT|DELETE|TRACE|CONNECT|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|VERSION-CONTROL|REPORT|CHECKOUT|CHECKIN|UNCHECKOUT|MKWORKSPACE|UPDATE|LABEL|MERGE|BASELINE-CONTROL|MKACTIVITY|ORDERPATCH|ACL|PATCH|SEARCH|BCOPY|BDELETE|BMOVE|BPROPFIND|BPROPPATCH|NOTIFY|POLL|SUBSCRIBE|UNSUBSCRIBE|X-MS-ENUMATTS|RPC_OUT_DATA|RPC_IN_DATA)[[:space:]]*|[sS][sS][hH]-[12]\.)/;
 
     # Ignore HTTP server responses (from scripts/base/protocols/http/dpd.sig)
     # Ignore thttpd UNKNOWN timeout answer
@@ -450,4 +453,47 @@ event OS_version_found(c: connection, host: addr, OS: OS_version) {
                          $recon_type=P0F,
                          $source=fmt("%d-%s", OS$dist, OS$detail),
                          $value=OS$genre]);
+}
+
+event arp_request(mac_src: string, mac_dst: string, SPA: addr, SHA: string, TPA: addr, THA: string) {
+    Log::write(LOG, [$ts=network_time(),
+                     $host=SPA,
+                     $recon_type=MAC_ADDRESS,
+                     $source="ARP_REQUEST_SRC",
+                     $value=SHA]);
+    if (THA != "00:00:00:00:00:00" && THA != "ff:ff:ff:ff:ff:ff") {
+        Log::write(LOG, [$ts=network_time(),
+                         $host=TPA,
+                         $recon_type=MAC_ADDRESS,
+                         $source="ARP_REQUEST_DST",
+                         $value=THA]);
+    }
+}
+
+event arp_reply(mac_src: string, mac_dst: string, SPA: addr, SHA: string, TPA: addr, THA: string) {
+    Log::write(LOG, [$ts=network_time(),
+                     $host=SPA,
+                     $recon_type=MAC_ADDRESS,
+                     $source="ARP_REPLY_SRC",
+                     $value=SHA]);
+    if (THA != "ff:ff:ff:ff:ff:ff") {
+        Log::write(LOG, [$ts=network_time(),
+                         $host=TPA,
+                         $recon_type=MAC_ADDRESS,
+                         $source="ARP_REPLY_DST",
+                         $value=THA]);
+    }
+}
+
+event connection_established(c: connection) {
+    if ("ftp-data" !in c$service && "gridftp-data" !in c$service &&
+        "irc-dcc-data" !in c$service) {
+        Log::write(LOG, [$ts=c$start_time,
+                         $host=c$id$resp_h,
+                         $recon_type=OPEN_PORT,
+                         $source="TCP",
+                         $srvport=c$id$resp_p,
+                         $value=fmt("tcp/%d", c$id$resp_p),
+                         $uid=c$uid]);
+    }
 }

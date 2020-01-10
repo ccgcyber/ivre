@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -36,6 +36,7 @@ except ImportError:
     HAVE_MYSQL = False
 
 
+from bottle import request
 from future.utils import viewitems
 from past.builtins import basestring
 
@@ -151,7 +152,7 @@ def get_user():
     """Return the connected user.
 
     """
-    return os.getenv('REMOTE_USER')
+    return request.environ.get('REMOTE_USER')
 
 
 def get_anonymized_user():
@@ -176,6 +177,7 @@ def _parse_query(dbase, query):
         'full': lambda: dbase.flt_empty,
         'noaccess': dbase.searchnonexistent,
         'category': lambda cat: dbase.searchcategory(cat.split(',')),
+        'source': dbase.searchsource,
     }[query[0]](*query[1:])
 
 
@@ -438,6 +440,14 @@ def flt_from_query(dbase, query, base_flt=None):
                 ))
             else:
                 add_unused(neg, param, value)
+        elif not neg and param == 'cert':
+            flt = dbase.flt_and(flt, dbase.searchcert())
+        elif not neg and param.startswith('cert.'):
+            subfield = param.split('.', 1)[1]
+            if subfield in ['md5', 'sha1', 'sha256']:
+                flt = dbase.flt_and(flt, dbase.searchcert(**{subfield: value}))
+            else:
+                add_unused(neg, param, value)
         elif not neg and param == 'httphdr':
             if value is None:
                 flt = dbase.flt_and(flt, dbase.searchhttphdr())
@@ -571,7 +581,7 @@ def flt_from_query(dbase, query, base_flt=None):
                 if '/' in port:
                     proto, port = port.split('/')
                 else:
-                    proto, port = "tcp", port
+                    proto = "tcp"
                 protos.setdefault(proto, []).append(int(port))
             for proto, ports in viewitems(protos):
                 flt = dbase.flt_and(

@@ -1,6 +1,6 @@
 /*
  * This file is part of IVRE.
- * Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+ * Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
  *
  * IVRE is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by
@@ -161,6 +161,18 @@ ivreWebUi
 	    }
 	    return 'cgi/view?q=' + encodeURIComponent(query) +
 		'&ipsasnumbers=1&datesasstrings=1';
+	};
+	$scope.get_addr_list = function() {
+	    var query;
+	    if($scope.shared.filter !== undefined
+	       && $scope.shared.filter.query !== "") {
+		query = $scope.shared.filter.query + " limit:0";
+	    }
+	    else {
+		query = "limit:0";
+	    }
+	    return 'cgi/view/onlyips?q=' + encodeURIComponent(query) +
+		'&format=txt';
 	};
 	$scope.get_title = function() {return document.title;};
 	$scope.add_bookmark = function() {
@@ -360,6 +372,9 @@ ivreWebUi
 	};
 	$scope.set_timer_toggle_preview = function(event, host) {
 	    event = event || window.event;
+	    if(event.target.tagName === "PRE") {
+		return;
+	    }
 	    if((event.keyCode || event.which) === 1)
 		clicktimeout = setTimeout(
 		    function() {
@@ -853,7 +868,7 @@ ivreWebUi
 		$("#uploadReferer")
 		    .attr("value", document.referrer);
 		$("#upload")
-		    .attr("action", 'cgi/view')
+		    .attr("action", 'cgi/view?output=html')
 		    .submit();
 	    }
 	};

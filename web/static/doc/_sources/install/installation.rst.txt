@@ -22,12 +22,12 @@ External programs
 ~~~~~~~~~~~~~~~~~
 
 If you plan to run scans from a machine, install `Nmap
-<https://nmap.org/>`_ and `Masscan
-<https://github.com/robertdavidgraham/masscan>`_. If you want to
-integrate screenshots, install `Tesseract
-<https://github.com/tesseract-ocr/tesseract>`_, `ImageMagick
-<https://www.imagemagick.org/>`_, `FFmpeg <http://ffmpeg.org/>`_ and
-`PhantomJS <http://phantomjs.org/>`_.
+<https://nmap.org/>`_, `Masscan
+<https://github.com/robertdavidgraham/masscan>`_, and/or `Zmap / Zgrab
+/ Zgrab2 <https://zmap.io/>`_. If you want to integrate screenshots,
+install `Tesseract <https://github.com/tesseract-ocr/tesseract>`_,
+`ImageMagick <https://www.imagemagick.org/>`_, `FFmpeg
+<http://ffmpeg.org/>`_ and `PhantomJS <http://phantomjs.org/>`_.
 
 If you plan to analyze PCAP file on a machine, install, depending on
 your needs:
@@ -43,20 +43,31 @@ Python
 ~~~~~~
   
 To install IVRE, you'll need `Python <http://www.python.org/>`__ 2
-(version 2.6 minimum, prefer 2.7) or 3 (version 3.3 minimum, prefer
-3.4 or newer), with the following modules:
+(version 2.6 minimum, prefer 2.7) or 3 (version 3.4 minimum), with the
+following modules:
 
 - `Bottle <https://bottlepy.org/>`_.
 - `Crypto <http://www.pycrypto.org/>`_.
 - `Future <https://python-future.org/>`_.
 - `pymongo <http://api.mongodb.org/python/>`_ version 2.7.2 minimum.
+- `tinydb <https://tinydb.readthedocs.io/>`_, to use the
+  **experimental** TinyDB backend (this does not require a database
+  server).
 - `py2neo <http://py2neo.org/v3/>`__ version 3, optional, to use the
   flow purpose with the Neo4j backend (**deprecated**).
 - `sqlalchemy <http://www.sqlalchemy.org/>`_ and `psycopg2
   <http://initd.org/psycopg/>`_ to use the **experimental** PostgreSQL
   backend.
+- `elasticsearch <https://github.com/elastic/elasticsearch-py>`_ and
+  `elasticsearch-dsl
+  <https://github.com/elastic/elasticsearch-dsl-py>`_ to use the
+  **experimental** Elasticsearch backend.
 - `PIL <http://www.pythonware.com/products/pil/>`_ optional, to trim
   screenshots.
+- `pyOpenSSL <https://pypi.org/project/pyOpenSSL/>`_ version 16.1.0
+  minimum, optional, to parse X509 certificates (a fallback exists
+  that calls ``Popen()`` the ``openssl`` binary and parses its output,
+  but it is much slower and less reliable).
 
 Databases
 ~~~~~~~~~
@@ -71,6 +82,10 @@ than 3.2).
 The ``passive``, ``nmap`` and ``view`` purposes have an
 **experimental** PostgreSQL backend that can be used in lieu of
 MongoDB.
+
+The ``view`` purpose has an **experimental** Elasticsearch backend. It
+can be used to create views accessible to other Elasticsearch tools,
+such as Kibana (see :ref:`usage/kibana:IVRE with Kibana`).
 
 The ``flow`` purpose can be used with Neo4j instead of MongoDB for
 historical reasons. This is **deprecated**.
@@ -101,11 +116,15 @@ under ``pkg/apache`` and ``pkg/nginx``. Also, the
 If you do not want (or cannot) to install a Web server, you can try
 IVRE's integrated server, suited for tests or tiny installations. Just
 run ``ivre httpd``!
-  
+
 IVRE
 ----
 
 The installation of IVRE itself can be done:
+
+- On `Kali <https://www.kali.org/>`_, just install the `package
+  <https://pkg.kali.org/pkg/ivre>`_ by running ``apt update && apt
+  install ivre``. You can also install ``ivre-doc`` if needed.
 
 - On `Fedora <https://getfedora.org/fr/>`_, you can use the `Copr
   package <https://copr.fedorainfracloud.org/coprs/>`_; follow the
@@ -161,13 +180,7 @@ The installation of IVRE itself can be done:
 Configuration
 -------------
 
-Default configuration values are hard-coded in ``ivre/config.py``. You
-should not change this file, unless you are modifying IVRE and you
-want to change the default configuration. You do not need to do this
-if you want to install IVRE with a non-default configuration, you just
-need to distribute a proper configuration file.
-
-You can override default values in configuration files:
+You can set configuration values in several files:
 
 - system-wide: ``ivre.conf`` in the following directories: ``/etc/``,
   ``/etc/ivre``, ``/usr/local/etc``, ``/usr/local/etc/ivre``.
@@ -175,11 +188,15 @@ You can override default values in configuration files:
 - user-specific: ``~/.ivre.conf`` (read after the system-wide
   configuration files, so highest priority).
 
-- another configuration file can be specified using the ``$IVRE_CONF``
-  environment variable.
+- execution-specific: another configuration file can be specified
+  using the ``$IVRE_CONF`` environment variable.
 
 The configuration files are Python files. They may set, for example,
-the variable ``DB`` to use a different database than the default one.
+the variable ``DB`` to use a different database than the default
+one.
+
+See :ref:`install/config:Configuration` to learn more about the
+different configuration parameters.
 
 Initialization
 --------------
@@ -216,13 +233,34 @@ on a decent server):
 
 ::
 
-   $ sudo ivre ipdata --download --import-all
+   $ sudo ivre ipdata --download
 
 It is advised to run this command on a regular basis (e.g.,
 weekly). If you use IVRE on several machines, you may want to run the
 command on one machine and create an ``ivre-data`` package containing
 the files under the ``/usr/share/ivre/geoip`` directory (or distribute
 those files somehow).
+
+The URLs downloaded are stored in the configuration. By default, the
+following files are downloaded:
+
+::
+
+   $ python
+   >>> from ivre.config import IPDATA_URLS
+   >>> for fname, url in IPDATA_URLS.items():
+   ...     print("%s: %s" % (fname, url))
+   ...
+   GeoLite2-City.tar.gz: https://ivre.rocks/data/geolite/GeoLite2-City.tar.gz
+   GeoLite2-City-CSV.zip: https://ivre.rocks/data/geolite/GeoLite2-City-CSV.zip
+   GeoLite2-Country.tar.gz: https://ivre.rocks/data/geolite/GeoLite2-Country.tar.gz
+   GeoLite2-Country-CSV.zip: https://ivre.rocks/data/geolite/GeoLite2-Country-CSV.zip
+   GeoLite2-ASN.tar.gz: https://ivre.rocks/data/geolite/GeoLite2-ASN.tar.gz
+   GeoLite2-ASN-CSV.zip: https://ivre.rocks/data/geolite/GeoLite2-ASN-CSV.zip
+   GeoLite2-dumps.tar.gz: https://ivre.rocks/data/geolite/GeoLite2-dumps.tar.gz
+   iso3166.csv: https://dev.maxmind.com/static/csv/codes/iso3166.csv
+   BGP.raw: http://thyme.apnic.net/current/data-raw-table
+
 
 Using Agents
 ------------

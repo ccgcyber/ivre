@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@ import json
 import re
 
 
-from builtins import int, range
+from builtins import int, object, range
 from future.utils import PY3, viewitems, viewvalues
 from past.builtins import basestring
 from sqlalchemy import and_, cast, column, create_engine, delete, desc, func, \
@@ -453,9 +453,6 @@ class SQLDBFlow(SQLDB, DBFlow):
     table_layout = namedtuple("flow_layout", ['flow'])
     tables = table_layout(Flow)
 
-    def __init__(self, url):
-        super(SQLDBFlow, self).__init__(url)
-
     @staticmethod
     def query(*args, **kargs):
         raise NotImplementedError()
@@ -526,12 +523,13 @@ class Filter(object):
 class ActiveFilter(Filter):
 
     def __init__(self, main=None, hostname=None, category=None, port=None,
-                 script=None, trace=None):
+                 script=None, tables=None, trace=None):
         self.main = main
         self.hostname = [] if hostname is None else hostname
         self.category = [] if category is None else category
         self.port = [] if port is None else port
         self.script = [] if script is None else script
+        self.tables = tables  # default value is handled in the subclasses
         self.trace = [] if trace is None else trace
 
     @property
@@ -670,20 +668,30 @@ class NmapFilter(ActiveFilter):
 
     def __init__(self, main=None, hostname=None, category=None, port=None,
                  script=None, tables=None, trace=None):
-        super(NmapFilter, self).__init__(main=main, hostname=hostname,
-                                         category=category, port=port,
-                                         script=script, trace=trace)
-        self.tables = SQLDBNmap.tables if tables is None else tables
+        super(NmapFilter, self).__init__(
+            main=main,
+            hostname=hostname,
+            category=category,
+            port=port,
+            script=script,
+            tables=SQLDBNmap.tables if tables is None else tables,
+            trace=trace,
+        )
 
 
 class ViewFilter(ActiveFilter):
 
     def __init__(self, main=None, hostname=None, category=None, port=None,
                  script=None, tables=None, trace=None):
-        super(ViewFilter, self).__init__(main=main, hostname=hostname,
-                                         category=category, port=port,
-                                         script=script, trace=trace)
-        self.tables = SQLDBView.tables if tables is None else tables
+        super(ViewFilter, self).__init__(
+            main=main,
+            hostname=hostname,
+            category=category,
+            port=port,
+            script=script,
+            tables=SQLDBView.tables if tables is None else tables,
+            trace=trace,
+        )
 
 
 class SQLDBActive(SQLDB, DBActive):
@@ -727,6 +735,12 @@ class SQLDBActive(SQLDB, DBActive):
             failed += self._migrate_schema_10_11()
         if (version or 0) < 12:
             failed += self._migrate_schema_11_12()
+        if (version or 0) < 13:
+            failed += self._migrate_schema_12_13()
+        if (version or 0) < 14:
+            failed += self._migrate_schema_13_14()
+        if (version or 0) < 15:
+            failed += self._migrate_schema_14_15()
         return failed
 
     def _migrate_schema_8_9(self):
@@ -858,6 +872,141 @@ the structured output for fcrdns and rpcinfo script.
             .where(and_(self.tables.scan.schema_version == 11,
                         self.tables.scan.id.notin_(failed)))
             .values(schema_version=12)
+        )
+        return len(failed)
+
+    def _migrate_schema_12_13(self):
+        """Converts a record from version 12 to version 13. Version 13 changes
+the structured output for ms-sql-info and smq-enum-shares scripts.
+
+        """
+        failed = set()
+        req = (select([self.tables.scan.id,
+                       self.tables.script.name,
+                       self.tables.script.port,
+                       self.tables.script.output,
+                       self.tables.script.data])
+               .select_from(join(join(self.tables.scan, self.tables.port),
+                                 self.tables.script))
+               .where(and_(self.tables.scan.schema_version == 12,
+                           self.tables.script.name.in_(["ms-sql-info",
+                                                        "smb-enum-shares"]))))
+        for rec in self.db.execute(req):
+            if rec.name in rec.data:
+                migr_func = {
+                    'ms-sql-info': xmlnmap.change_ms_sql_info,
+                    'smb-enum-shares': xmlnmap.change_smb_enum_shares,
+                }[rec.name]
+                try:
+                    data = migr_func(rec.data[rec.name])
+                except Exception:
+                    utils.LOGGER.warning("Cannot migrate host %r", rec.id,
+                                         exc_info=True)
+                    failed.add(rec.id)
+                else:
+                    if data:
+                        self.db.execute(
+                            update(self.tables.script)
+                            .where(and_(self.tables.script.port == rec.port,
+                                        self.tables.script.name == rec.name))
+                            .values(data={rec.name: data})
+                        )
+        self.db.execute(
+            update(self.tables.scan)
+            .where(and_(self.tables.scan.schema_version == 12,
+                        self.tables.scan.id.notin_(failed)))
+            .values(schema_version=13)
+        )
+        return len(failed)
+
+    def _migrate_schema_13_14(self):
+        """Converts a record from version 13 to version 14. Version 14 changes
+the structured output for ssh-hostkey and ls scripts to prevent a same
+field from having different data types.
+
+        """
+        failed = set()
+        scripts = [
+            script_name
+            for script_name, alias in viewitems(xmlnmap.ALIASES_TABLE_ELEMS)
+            if alias == 'ls'
+        ]
+        scripts.append('ssh-hostkey')
+        req = (select([self.tables.scan.id,
+                       self.tables.script.name,
+                       self.tables.script.port,
+                       self.tables.script.output,
+                       self.tables.script.data])
+               .select_from(join(join(self.tables.scan, self.tables.port),
+                                 self.tables.script))
+               .where(and_(self.tables.scan.schema_version == 13,
+                           self.tables.script.name.in_(scripts))))
+        for rec in self.db.execute(req):
+            if rec.name in rec.data:
+                migr_func = (
+                    xmlnmap.change_ssh_hostkey
+                    if rec.name == 'ssh-hostkey' else
+                    xmlnmap.change_ls_migrate
+                )
+                try:
+                    data = migr_func(rec.data[rec.name])
+                except Exception:
+                    utils.LOGGER.warning("Cannot migrate host %r", rec.id,
+                                         exc_info=True)
+                    failed.add(rec.id)
+                else:
+                    if data:
+                        self.db.execute(
+                            update(self.tables.script)
+                            .where(and_(self.tables.script.port == rec.port,
+                                        self.tables.script.name == rec.name))
+                            .values(data={rec.name: data})
+                        )
+        self.db.execute(
+            update(self.tables.scan)
+            .where(and_(self.tables.scan.schema_version == 13,
+                        self.tables.scan.id.notin_(failed)))
+            .values(schema_version=14)
+        )
+        return len(failed)
+
+    def _migrate_schema_14_15(self):
+        """Converts a record from version 14 to version 15. Version 15 changes
+the structured output for httpègit script to move data to values
+instead of keys.
+
+        """
+        failed = set()
+        req = (select([self.tables.scan.id,
+                       self.tables.script.name,
+                       self.tables.script.port,
+                       self.tables.script.output,
+                       self.tables.script.data])
+               .select_from(join(join(self.tables.scan, self.tables.port),
+                                 self.tables.script))
+               .where(and_(self.tables.scan.schema_version == 14,
+                           self.tables.script.name == "http-git")))
+        for rec in self.db.execute(req):
+            if rec.name in rec.data:
+                try:
+                    data = xmlnmap.change_http_git(rec.data[rec.name])
+                except Exception:
+                    utils.LOGGER.warning("Cannot migrate host %r", rec.id,
+                                         exc_info=True)
+                    failed.add(rec.id)
+                else:
+                    if data:
+                        self.db.execute(
+                            update(self.tables.script)
+                            .where(and_(self.tables.script.port == rec.port,
+                                        self.tables.script.name == rec.name))
+                            .values(data={rec.name: data})
+                        )
+        self.db.execute(
+            update(self.tables.scan)
+            .where(and_(self.tables.scan.schema_version == 14,
+                        self.tables.scan.id.notin_(failed)))
+            .values(schema_version=15)
         )
         return len(failed)
 
@@ -1065,6 +1214,10 @@ the structured output for fcrdns and rpcinfo script.
                                    else (cls.tables.scan.id == oid[0]))
         return cls.base_filter(main=(cls.tables.scan.id.notin_(oid[0])) if neg
                                else (cls.tables.scan.id.in_(oid[0])))
+
+    @classmethod
+    def searchversion(cls, version):
+        return cls.base_filter(main=cls.tables.scan.schema_version == version)
 
     @classmethod
     def searchcmp(cls, key, val, cmpop):
@@ -1392,11 +1545,19 @@ the structured output for fcrdns and rpcinfo script.
         return cls.base_filter(script=[(not neg, req)])
 
     @classmethod
-    def searchcert(cls, keytype=None):
-        if keytype is None:
-            return cls.searchscript(name="ssl-cert")
-        return cls.searchscript(name="ssl-cert",
-                                values={'pubkey': {'type': keytype}})
+    def searchcert(cls, keytype=None, md5=None, sha1=None, sha256=None):
+        values = {}
+        if keytype is not None:
+            values['pubkey'] = {'type': keytype}
+        if md5 is not None:
+            values['md5'] = md5
+        if sha1 is not None:
+            values['sha1'] = sha1
+        if sha256 is not None:
+            values['sha256'] = sha256
+        if values:
+            return cls.searchscript(name="ssl-cert", values=values)
+        return cls.searchscript(name="ssl-cert")
 
     @classmethod
     def searchsvchostname(cls, hostname):
@@ -1593,10 +1754,7 @@ class SQLDBNmap(SQLDBActive, DBNmap):
     }
 
     base_filter = NmapFilter
-
-    def __init__(self, url):
-        super(SQLDBNmap, self).__init__(url)
-        self.content_handler = xmlnmap.Nmap2DB
+    content_handler = xmlnmap.Nmap2DB
 
     def store_or_merge_host(self, host):
         self.store_host(host)
@@ -1681,9 +1839,6 @@ class SQLDBView(SQLDBActive, DBView):
 
     base_filter = ViewFilter
 
-    def __init__(self, url):
-        super(SQLDBView, self).__init__(url)
-
     def store_or_merge_host(self, host):
         # FIXME: may cause performance issues
         self.start_store_hosts()
@@ -1713,7 +1868,7 @@ class PassiveFilter(Filter):
             "tables": self.tables,
         }
 
-    def __nonzero__(self):
+    def __bool__(self):
         return self.main is not None
 
     def copy(self):
@@ -1793,9 +1948,6 @@ class SQLDBPassive(SQLDB, DBPassive):
 
     base_filter = PassiveFilter
 
-    def __init__(self, url):
-        super(SQLDBPassive, self).__init__(url)
-
     def count(self, flt):
         return self.db.execute(
             flt.query(
@@ -1816,7 +1968,7 @@ class SQLDBPassive(SQLDB, DBPassive):
 
     def _get(self, flt, limit=None, skip=None, sort=None, fields=None):
         if fields is not None:
-            utils.LOGGER.warning("Argument 'fields' provided but unused.")
+            utils.LOGGER.warning("Argument 'fields' provided but unused")
         req = flt.query(
             select([
                 self.tables.passive.id.label("_id"),
@@ -2092,11 +2244,11 @@ passive table."""
                 if len(name) == 1:
                     name = name[0]
                 else:
-                    return cls._flt_or(*(cls._searchdns(name=domain,
-                                                        reverse=reverse,
-                                                        dnstype=dnstype,
-                                                        subdomains=subdomains)
-                                         for domain in name))
+                    return cls.flt_or(*(cls._searchdns(name=domain,
+                                                       reverse=reverse,
+                                                       dnstype=dnstype,
+                                                       subdomains=subdomains)
+                                        for domain in name))
         return cls._searchdns(name=name, reverse=reverse, dnstype=dnstype,
                               subdomains=subdomains)
 
@@ -2118,6 +2270,30 @@ passive table."""
         if dnstype is not None:
             cnd &= cls.tables.passive.source.op('~')('^%s-' % dnstype.upper())
         return PassiveFilter(main=cnd)
+
+    @classmethod
+    def searchmac(cls, mac=None, neg=False):
+        if mac is None:
+            if neg:
+                return PassiveFilter(
+                    main=cls.tables.passive.recontype != 'MAC_ADDRESS'
+                )
+            return PassiveFilter(
+                main=cls.tables.passive.recontype == 'MAC_ADDRESS'
+            )
+        if isinstance(mac, utils.REGEXP_T):
+            cnd = cls.tables.passive.value.op(
+                '~*' if (mac.flags & re.IGNORECASE) else '~'
+            )(mac.pattern)
+            if neg:
+                cnd = not_(cnd)
+        elif neg:
+            cnd = cls.tables.passive.value != mac
+        else:
+            cnd = cls.tables.passive.value == mac
+        return PassiveFilter(
+            main=(cls.tables.passive.recontype == 'MAC_ADDRESS') & cnd
+        )
 
     @classmethod
     def searchuseragent(cls, useragent=None, neg=False):
@@ -2169,19 +2345,21 @@ passive table."""
         ))
 
     @classmethod
-    def searchcert(cls, keytype=None):
-        if keytype is None:
-            return PassiveFilter(main=(
-                (cls.tables.passive.recontype == 'SSL_SERVER') &
-                (cls.tables.passive.source == 'cert')
-            ))
-        return PassiveFilter(main=(
+    def searchcert(cls, keytype=None, md5=None, sha1=None, sha256=None):
+        res = (
             (cls.tables.passive.recontype == 'SSL_SERVER') &
-            (cls.tables.passive.source == 'cert') &
-            (cls.tables.passive.moreinfo.op('->>')(
-                'pubkeyalgo'
-            ) == keytype + 'Encryption')
-        ))
+            (cls.tables.passive.source == 'cert')
+        )
+        if keytype is not None:
+            res &= (cls.tables.passive.moreinfo.op('->>')('pubkeyalgo') ==
+                    keytype + 'Encryption')
+        if md5 is not None:
+            res &= (cls.tables.passive.moreinfo.op('->>')('md5') == md5)
+        if sha1 is not None:
+            res &= (cls.tables.passive.moreinfo.op('->>')('sha1') == sha1)
+        if sha256 is not None:
+            res &= (cls.tables.passive.moreinfo.op('->>')('sha256') == sha256)
+        return PassiveFilter(main=res)
 
     @classmethod
     def _searchja3(cls, value_or_hash=None):
