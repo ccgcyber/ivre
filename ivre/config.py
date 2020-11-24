@@ -40,7 +40,6 @@ DB_DATA = None  # specific: maxmind:///<ivre_share_path>/geoip
 # Begin batch sizes
 LOCAL_BATCH_SIZE = 10000      # used with --local-bulk
 MONGODB_BATCH_SIZE = 100
-NEO4J_BATCH_SIZE = 1000
 POSTGRES_BATCH_SIZE = 10000
 # End batch sizes
 # specific: if no value is specified for *_PATH variables, they are
@@ -58,11 +57,6 @@ NMAP_SHARE_PATH = None
 WIRESHARK_SHARE_PATH = None
 # Begin commands
 TESSERACT_CMD = "tesseract"
-GZ_CMD = "zcat"
-BZ2_CMD = "bzcat"
-MD5_CMD = "md5sum"
-SHA1_CMD = "sha1sum"
-SHA256_CMD = "sha256sum"
 OPENSSL_CMD = "openssl"
 # End commands
 
@@ -173,6 +167,17 @@ MAXMIND_LICENSE_KEY = None
 # End IPDATA_URLS
 
 GEOIP_LANG = "en"
+
+# Some IP ranges send syn-ack answers for any
+# port. VIEW_SYNACK_HONEYPOT_COUNT is the number of open ports with
+# only syn-ack (no script, no service identified). The value you need
+# to set here highly depends on the number of ports you usually scan
+# and/or see.
+#
+# The default value, 200 seems high enough to work fine with most
+# situations. None means that no host should be treated as a "syn-ack
+# honeypot".
+VIEW_SYNACK_HONEYPOT_COUNT = 200
 
 WEB_ALLOWED_REFERERS = None
 WEB_NOTES_BASE = "/dokuwiki/#IP#"

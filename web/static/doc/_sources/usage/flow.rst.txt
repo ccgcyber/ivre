@@ -16,7 +16,8 @@ Usage
 Data insertion
 ..............
 
-There are two tools for data insertion, the first is based on Zeek (Bro):
+There are two tools for data insertion, the first is based on Zeek
+(previously known as Bro):
 
 .. code:: bash
 
@@ -130,29 +131,6 @@ The **Display** pane also allows to change the amount of time slots to
 represent on the timeline (capped by the actual time precision set in
 ``ivre.conf``). The timeline can also be played on the graph by clicking
 the 'Play timeline' button.
-
-Raw Database queries
-~~~~~~~~~~~~~~~~~~~~
-
-Ivre flow module is currently built on top of neo4j. The query language
-of this database is quite intuitive and the user is encouraged to
-execute his own custom queries. The model is as follows:
-
-::
-
-      (:Host)-[:SEND]->(:Flow)-[:TO]->(:Host)
-         |                |
-         \                /
-          `-->(:Intel)<--'
-
-As an example, the following query returns the most common (proto,
-dport):
-
-::
-
-   MATCH (f:Flow)
-   RETURN [f.proto, f.dport], count(*) AS cnt
-   ORDER BY cnt DESC
 
 Flow Filters
 ~~~~~~~~~~~~

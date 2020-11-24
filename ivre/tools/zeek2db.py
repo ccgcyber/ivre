@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -16,21 +16,28 @@
 # You should have received a copy of the GNU General Public License
 # along with IVRE. If not, see <http://www.gnu.org/licenses/>.
 
-"""Update the flow database from Bro logs"""
+"""Update the flow database from Zeek logs"""
 
 
+from argparse import ArgumentParser
 import os
-from ivre.parser.bro import BroFile
+
+
+from ivre.parser.zeek import ZeekFile
 from ivre.db import db
 from ivre import config, utils, flow
 
 
-def _bro2flow(rec):
+def _zeek2flow(rec):
     """Prepares a document for db.flow.*add_flow()."""
     if "id_orig_h" in rec:
         rec["src"] = rec.pop("id_orig_h")
+    elif "pkt_src" in rec:
+        rec["src"] = rec.pop("pkt_src")
     if "id_resp_h" in rec:
         rec["dst"] = rec.pop("id_resp_h")
+    elif "pkt_dst" in rec:
+        rec["dst"] = rec.pop("pkt_dst")
     if "ts" in rec:
         rec["start_time"] = rec["end_time"] = rec.pop("ts")
     if rec.get('proto', None) == 'icmp':
@@ -39,6 +46,11 @@ def _bro2flow(rec):
     elif 'id_orig_p' in rec and 'id_resp_p' in rec:
         rec['sport'], rec['dport'] = rec.pop('id_orig_p'), rec.pop('id_resp_p')
     return rec
+
+
+def arp2flow(bulk, rec):
+    rec['proto'] = 'arp'
+    db.flow.any2flow(bulk, 'arp', rec)
 
 
 def http2flow(bulk, rec):
@@ -90,10 +102,11 @@ def dns2flow(bulk, rec):
     rec['answers'] = [elt.lower() for elt in
                       (rec['answers'] if rec['answers'] else [])]
     rec['query'] = rec['query'].lower() if rec['query'] else None
-    db.flow.dns2flow(bulk, rec)
+    db.flow.any2flow(bulk, 'dns', rec)
 
 
 FUNCTIONS = {
+    "arp": arp2flow,
     "conn": db.flow.conn2flow,
     "http": http2flow,
     "ssh": ssh2flow,
@@ -112,12 +125,10 @@ def any2flow(name):
 
 
 def main():
-    """Update the flow database from Bro logs"""
-    parser, use_argparse = utils.create_argparser(__doc__,
-                                                  extraargs="logfiles")
-    if use_argparse:
-        parser.add_argument("logfiles", nargs='*', metavar='FILE',
-                            help="Bro log files")
+    """Update the flow database from Zeek logs"""
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument("logfiles", nargs='*', metavar='FILE',
+                        help="Zeek log files")
     parser.add_argument("-v", "--verbose", help="verbose mode",
                         action="store_true")
     parser.add_argument("-C", "--no-cleanup",
@@ -132,25 +143,25 @@ def main():
         if not os.path.exists(fname):
             utils.LOGGER.error("File %r does not exist", fname)
             continue
-        with BroFile(fname) as brof:
+        with ZeekFile(fname) as zeekf:
             bulk = db.flow.start_bulk_insert()
             utils.LOGGER.debug("Parsing %s\n\t%s", fname,
                                "Fields:\n%s\n" % "\n".join(
                                    "%s: %s" % (f, t)
-                                   for f, t in brof.field_types
+                                   for f, t in zeekf.field_types
                                ))
-            if brof.path in FUNCTIONS:
-                func = FUNCTIONS[brof.path]
-            elif brof.path in flow.META_DESC:
-                func = any2flow(brof.path)
+            if zeekf.path in FUNCTIONS:
+                func = FUNCTIONS[zeekf.path]
+            elif zeekf.path in flow.META_DESC:
+                func = any2flow(zeekf.path)
             else:
                 utils.LOGGER.debug("Log format not (yet) supported for %r",
                                    fname)
                 continue
-            for line in brof:
+            for line in zeekf:
                 if not line:
                     continue
-                func(bulk, _bro2flow(line))
+                func(bulk, _zeek2flow(line))
             db.flow.bulk_commit(bulk)
-            if brof.path == "conn" and not args.no_cleanup:
+            if zeekf.path == "conn" and not args.no_cleanup:
                 db.flow.cleanup_flows()

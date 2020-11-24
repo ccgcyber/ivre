@@ -201,11 +201,14 @@ var HELP_FILTERS = {
 	    "title": "mysqlemptypwd",
 	    "content": "Look for MySQL servers with an empty password for the <code>root</code> account.",
 	},
-        "httphdr": {
+	"httphdr": {
 	    "title": "httphdr<b>(:[header](:[value]))</b>",
-            "title": "httphdr",
-            "content": "Look for HTTP headers."
-        },
+	    "content": "Look for HTTP headers."
+	},
+	"httpapp": {
+	    "title": "httpapp<b>(:[name](:[version]))</b>",
+	    "content": "Look for HTTP applications."
+	},
 	"owa": {
 	    "title": "owa",
 	    "content": "Look for OWA (Outlook Web App) servers.",
@@ -214,8 +217,8 @@ var HELP_FILTERS = {
 	    "title": "phpmyadmin",
 	    "content": "Look for PHPMyAdmin servers.",
 	},
-	"smb.dnsdomain:": {
-	    "title": "smb.dnsdomain:[FQDN]",
+	"smb.domain_dns:": {
+	    "title": "smb.domain_dns:[FQDN]",
 	    "content": "Search results with SMB service in a specific DNS domain.",
 	},
 	"smb.domain:": {
@@ -226,8 +229,8 @@ var HELP_FILTERS = {
 	    "title": "smb.fqdn:[NetBIOS]",
 	    "content": "Search results with SMB service in a specific host name (FQDN).",
 	},
-	"smb.forest:": {
-	    "title": "smb.forest:[FQDN]",
+	"smb.forest_dns:": {
+	    "title": "smb.forest_dns:[FQDN]",
 	    "content": "Search results with SMB service in a specific forest (DNS name).",
 	},
 	"smb.lanmanager:": {
@@ -236,15 +239,31 @@ var HELP_FILTERS = {
 	},
 	"smb.os:": {
 	    "title": "smb.os:[OS]",
-	    "content": "Search results with SMB service with a specific OS.",
+	    "content": "Search results with SMB service reporting a specific OS.",
+	},
+	"smb.ntlm-os:": {
+	    "title": "smb.ntlm-os:[Version]",
+	    "content": "Search results with NTLM protocol in SMB service reporting a specific OS.",
+	},
+	"smb.ntlm-version:": {
+	    "title": "smb.ntlm-version:[Version]",
+	    "content": "Search results with a specific versioln of the NTLM protocol in SMB service.",
+	},
+	"smb.smb-version:": {
+	    "title": "smb.smb-version:[Version]",
+	    "content": "Search results with a specific versioln of the SMB protocol.",
 	},
 	"smb.server:": {
 	    "title": "smb.server:[NetBIOS]",
-	    "content": "Search results with SMB service in a specific host name (NetBIOS).",
+	    "content": "Search results with SMB service with a specific host name (NetBIOS).",
 	},
 	"smb.workgroup:": {
 	    "title": "smb.workgroup:[NetBIOS]",
 	    "content": "Search results with SMB service in a specific workgroup (NetBIOS).",
+	},
+	"smb.guid:": {
+	    "title": "smb.guid:[GUID]",
+	    "content": "Search results with SMB service with a specific GUID.",
 	},
 	"smbshare": {
 	    "title": "smbshare<b>(:[access mode])</b>",
@@ -298,16 +317,56 @@ var HELP_FILTERS = {
 	    "title": "xp445",
 	    "content": "Look for Windows XP machines with TCP/445 port open.",
 	},
+        "cert.keytype:": {
+            "title": "cert.keytype:[exact value or /regexp/]",
+            "content": "Look for a particular certificate public key type.",
+        },
+        "cert.self_signed": {
+            "title": "<b>(!)</b>cert.self_signed",
+            "content": "Look for self signed certificates.",
+        },
+        "cert.subject:": {
+            "title": "cert.subject:[exact value or /regexp/]",
+            "content": "Look for a particular certificate subject.",
+        },
+        "cert.issuer:": {
+            "title": "cert.subject:[exact value or /regexp/]",
+            "content": "Look for a particular certificate issuer.",
+        },
+        "cert.md5:": {
+            "title": "cert.md5:[MD5 hash or /MD5 hash regexp/]",
+            "content": "Look for a particular certificate, based on the MD5 hash.",
+        },
+        "cert.sha1:": {
+            "title": "cert.sha1:[SHA1 hash or /SHA1 hash regexp/]",
+            "content": "Look for a particular certificate, based on the SHA1 hash.",
+        },
+        "cert.sha256:": {
+            "title": "cert.sha256:[SHA256 hash or /SHA256 hash regexp/]",
+            "content": "Look for a particular certificate, based on the SHA256 hash.",
+        },
+        "cert.pkmd5:": {
+            "title": "cert.pkmd5:[MD5 hash or /MD5 hash regexp/]",
+            "content": "Look for a particular certificate public key, based on the MD5 hash.",
+        },
+        "cert.pksha1:": {
+            "title": "cert.pksha1:[SHA1 hash or /SHA1 hash regexp/]",
+            "content": "Look for a particular certificate public key, based on the SHA1 hash.",
+        },
+        "cert.pksha256:": {
+            "title": "cert.pksha256:[SHA256 hash or /SHA256 hash regexp/]",
+            "content": "Look for a particular certificate public key, based on the SHA256 hash.",
+        },
 	"ssl-ja3-client": {
-	    "title": "(!)ssl-ja3-client<b>[:JA3]</b>",
+	    "title": "(!)ssl-ja3-client<b>(:[JA3])</b>",
 	    "content": "Look for hosts with a JA3 or with the given JA3.",
 	},
 	"ssl-ja3-server": {
-	    "title": "(!)ssl-ja3-server<b>[:[JA3S][:JA3]]</b>",
+	    "title": "(!)ssl-ja3-server<b>(:[JA3S](:[JA3]))</b>",
 	    "content": "Look for hosts with a JA3S, with the given JA3S, with a JA3S corresponding to the given JA3 or with the given JA3S corresponding to the given JA3",
 	},
 	"useragent": {
-	    "title": "(!)useragent<b>[:[exact_value or /regexp/]]</b>",
+	    "title": "(!)useragent<b>(:[exact_value or /regexp/])</b>",
 	    "content": "Look for hosts using a User-Agent matching the argument."
 	},
 	/* OS fingerprint */
@@ -466,17 +525,21 @@ var HELP_TOPVALUES = {
 	    "title": "<b>(!)</b>cpe.version<b>(:[type](:[vendor])(:[product](:[version])))</b> or <b>(!)</b>cpe<b>(:[...])",
 	    "content": "CPE versions (matching optional type / vendor / product / version filter).",
 	},
-	"smb.dnsdomain": {
-	    "title": "<b>(!)</b>smb.dnsdomain",
+	"smb.domain_dns": {
+	    "title": "<b>(!)</b>smb.domain_dns",
 	    "content": "SMB domains (DNS).",
 	},
 	"smb.domain": {
 	    "title": "<b>(!)</b>smb.domain",
 	    "content": "SMB domains.",
 	},
-	"smb.forest": {
-	    "title": "<b>(!)</b>smb.forest",
+	"smb.forest_dns": {
+	    "title": "<b>(!)</b>smb.forest_dns",
 	    "content": "SMB forests.",
+	},
+	"smb.guid": {
+	    "title": "<b>(!)</b>smb.guid",
+	    "content": "SMB GUIDs.",
 	},
 	"smb.workgroup": {
 	    "title": "<b>(!)</b>smb.workgroup",
@@ -489,6 +552,18 @@ var HELP_TOPVALUES = {
 	"smb.os": {
 	    "title": "<b>(!)</b>smb.os",
 	    "content": "OS versions according to the SMB service.",
+	},
+	"smb.ntlm-os": {
+	    "title": "<b>(!)</b>smb.ntlm-os",
+	    "content": "OS versions according to the NTLM protocol in the SMB service.",
+	},
+	"smb.ntlm-version": {
+	    "title": "<b>(!)</b>smb.ntlm-version",
+	    "content": "NTLM versions in the SMB service.",
+	},
+	"smb.smb-version": {
+	    "title": "<b>(!)</b>smb.smb-version",
+	    "content": "SMB versions.",
 	},
 	"domains": {
 	    "title": "<b>(!)</b>domains<b>(:[level])</b>:",
@@ -583,11 +658,7 @@ var HELP_TOPVALUES = {
 	    "title": "<b>(!)</b>city"
 	},
 	"net": {
-	    "content": "net",
-	    "title": "<b>(!)</b>net",
-	},
-	"net:": {
-	    "content": "net[:mask]",
+	    "content": "net(:mask)",
 	    "title": "<b>(!)</b>net:",
 	},
 	"screenwords": {
@@ -794,8 +865,8 @@ var HELP_TOPVALUES = {
 	    "content": "ike.vendor_ids.value",
 	    "title": "<b>(!)</b>ike.vendor_ids.value"
 	},
-	"httphdr:": {
-	    "title": "httphdr<b>(:[name])",
+	"httphdr": {
+	    "title": "httphdr<b>(:[name])</b>",
 	    "content": "Top HTTP header values seen",
 	},
 	"httphdr.name": {
@@ -806,30 +877,34 @@ var HELP_TOPVALUES = {
 	    "title": "httphdr.value",
 	    "content": "Top HTTP header values seen, regardless of the header name",
 	},
-	"useragent:": {
-	    "title": "<b>(!)<b>useragent<b>[:[value]]</b>",
+	"httpapp": {
+	    "title": "httpapp<b>(:[name])</b>",
+	    "content": "Top HTTP applications (and versions) seen",
+	},
+	"useragent": {
+	    "title": "<b>(!)<b>useragent<b>(:[value])</b>",
 	    "content": "Top HTTP User-Agent values seen."
 	},
-        "ja3-client:": {
-	    "title": "<b>(!)<b>ja3-client<b>[:[value]]</b>",
+	"ja3-client": {
+	    "title": "<b>(!)<b>ja3-client<b>(:[value])</b>",
 	    "content": "Top JA3 client values (MD5)."
-        },
-        "ja3-client.md5:": {
-	    "title": "<b>(!)<b>ja3-client.md5<b>[:[value]]</b>",
+	},
+	"ja3-client.md5": {
+	    "title": "<b>(!)<b>ja3-client.md5<b>(:[value])</b>",
 	    "content": "Top JA3 client values (MD5)."
-        },
-        "ja3-client.sha1:": {
-	    "title": "<b>(!)<b>ja3-client.sha1<b>[:[value]]</b>",
+	},
+	"ja3-client.sha1": {
+	    "title": "<b>(!)<b>ja3-client.sha1<b>(:[value])</b>",
 	    "content": "Top JA3 client values (SHA1)."
-        },
-        "ja3-client.sha256:": {
-	    "title": "<b>(!)<b>ja3-client.sha256<b>[:[value]]</b>",
+	},
+	"ja3-client.sha256": {
+	    "title": "<b>(!)<b>ja3-client.sha256<b>(:[value])</b>",
 	    "content": "Top JA3 client values (SHA256)."
-        },
-        "ja3-client.raw:": {
-	    "title": "<b>(!)<b>ja3-client.raw<b>[:[value]]</b>",
+	},
+	"ja3-client.raw": {
+	    "title": "<b>(!)<b>ja3-client.raw<b>(:[value])</b>",
 	    "content": "Top JA3 client values (raw fingerprint)."
-        },
+	},
     }
 };
 

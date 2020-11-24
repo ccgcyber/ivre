@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -21,11 +21,7 @@ from __future__ import print_function
 import json
 import os
 from xml.sax import saxutils
-try:
-    from collections import OrderedDict
-except ImportError:
-    # fallback to dict for Python 2.6
-    OrderedDict = dict
+from collections import OrderedDict
 import sys
 try:
     reload(sys)
@@ -39,7 +35,11 @@ from future.utils import viewitems, viewvalues
 from past.builtins import basestring
 
 
-from ivre import utils, db, graphroute, config, xmlnmap
+from ivre.active.data import ALIASES_TABLE_ELEMS
+from ivre.config import HONEYD_IVRE_SCRIPTS_PATH
+from ivre.db import db
+from ivre import graphroute
+from ivre import utils
 
 
 HONEYD_ACTION_FROM_NMAP_STATE = {
@@ -91,7 +91,7 @@ def _nmap_port2honeyd_action(port):
                               if k != 'SSH']),
                 )
             return '''"%s %s"''' % (
-                os.path.join(config.HONEYD_IVRE_SCRIPTS_PATH, 'sshd'),
+                os.path.join(HONEYD_IVRE_SCRIPTS_PATH, 'sshd'),
                 banner
             )
     return 'open'
@@ -196,7 +196,7 @@ def _display_xml_scan(scan, out=sys.stdout):
               '<?xml-stylesheet '
               'href="file:///usr/local/bin/../share/nmap/nmap.xsl" '
               'type="text/xsl"?>\n'
-              '<!-- Nmap %(version)s scan initiated %(startstr)s '
+              '<!-- %(scanner)s %(version)s scan initiated %(startstr)s '
               'as: %(args)s -->\n'
               '<nmaprun scanner="%(scanner)s" args="%(args)s" '
               'start="%(start)s" startstr="%(startstr)s" '
@@ -238,7 +238,7 @@ def _display_xml_script(s, out=sys.stdout):
     out.write('<script id=%s' % saxutils.quoteattr(s['id']))
     if 'output' in s:
         out.write(' output=%s' % saxutils.quoteattr(s['output']))
-    key = xmlnmap.ALIASES_TABLE_ELEMS.get(s['id'], s['id'])
+    key = ALIASES_TABLE_ELEMS.get(s['id'], s['id'])
     if key in s:
         out.write('>')
         _display_xml_table_elem(s[key], first=True, out=out)
@@ -460,9 +460,9 @@ def displayfunction_honeyd(cur):
     _display_honeyd_epilogue(honeyd_routes, honeyd_entries, sys.stdout)
 
 
-def displayfunction_nmapxml(cur):
+def displayfunction_nmapxml(cur, scan=None):
     _display_xml_preamble(out=sys.stdout)
-    _display_xml_scan({}, out=sys.stdout)
+    _display_xml_scan(scan or {}, out=sys.stdout)
     for h in cur:
         _display_xml_host(h, out=sys.stdout)
     _display_xml_epilogue(out=sys.stdout)
@@ -478,9 +478,8 @@ def displayfunction_explain(flt, dbase):
     sys.stdout.write(dbase.explain(dbase._get(flt), indent=4) + '\n')
 
 
-def displayfunction_remove(cur, dbase):
-    for h in cur:
-        dbase.remove(h)
+def displayfunction_remove(flt, dbase):
+    dbase.remove_many(flt)
 
 
 def displayfunction_graphroute(cur, arg, gr_include, gr_dont_reset):
@@ -492,14 +491,14 @@ def displayfunction_graphroute(cur, arg, gr_include, gr_dont_reset):
     if arg == "dot":
         if arg == "AS":
             def cluster(ipaddr):
-                res = db.db.data.as_byip(ipaddr)
+                res = db.data.as_byip(ipaddr)
                 if res is None:
                     return None
                 return (res['as_num'],
                         "%(as_num)d\n[%(as_name)s]" % res)
         elif arg == "Country":
             def cluster(ipaddr):
-                res = db.db.data.country_byip(ipaddr)
+                res = db.data.country_byip(ipaddr)
                 if res is None:
                     return None
                 return (res['country_code'],

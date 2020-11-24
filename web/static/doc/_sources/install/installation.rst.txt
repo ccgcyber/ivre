@@ -32,29 +32,24 @@ install `Tesseract <https://github.com/tesseract-ocr/tesseract>`_,
 If you plan to analyze PCAP file on a machine, install, depending on
 your needs:
 
-- `Zeek <https://www.zeek.org/>`_ (previously known as Bro, version
-  2.5 minimum).
-- `p0f <http://lcamtuf.coredump.cx/p0f/>`_ (version 2, will not work
-  with version 3).
+- `Zeek <https://www.zeek.org/>`_ (previously known as Bro, version 3
+  minimum).
 - `Argus <http://qosient.com/argus/>`_.
 - `Nfdump <http://nfdump.sourceforge.net/>`_.
 
 Python
 ~~~~~~
   
-To install IVRE, you'll need `Python <http://www.python.org/>`__ 2
-(version 2.6 minimum, prefer 2.7) or 3 (version 3.4 minimum), with the
-following modules:
+To install IVRE, you'll need `Python <http://www.python.org/>`__ 2.7
+or 3 (version 3.4 minimum), with the following modules:
 
-- `Bottle <https://bottlepy.org/>`_.
-- `Crypto <http://www.pycrypto.org/>`_.
-- `Future <https://python-future.org/>`_.
+- `bottle <https://bottlepy.org/>`_.
+- `cryptography <https://cryptography.io/en/latest/>`_.
+- `future <https://python-future.org/>`_.
 - `pymongo <http://api.mongodb.org/python/>`_ version 2.7.2 minimum.
 - `tinydb <https://tinydb.readthedocs.io/>`_, to use the
   **experimental** TinyDB backend (this does not require a database
   server).
-- `py2neo <http://py2neo.org/v3/>`__ version 3, optional, to use the
-  flow purpose with the Neo4j backend (**deprecated**).
 - `sqlalchemy <http://www.sqlalchemy.org/>`_ and `psycopg2
   <http://initd.org/psycopg/>`_ to use the **experimental** PostgreSQL
   backend.
@@ -73,11 +68,9 @@ Databases
 ~~~~~~~~~
 
 IVRE's reference backend service is `MongoDB
-<https://www.mongodb.org/>`_, version 2.6 minimum. It is highly
+<https://www.mongodb.org/>`_, version 3.2 minimum. It is highly
 suggested that you use the latest stable release (the performances
-have improved quite a lot since version 2.6), or at least 3.2 (IVRE
-uses a hack for some operations when it connects to a server older
-than 3.2).
+tend to improve a lot).
 
 The ``passive``, ``nmap`` and ``view`` purposes have an
 **experimental** PostgreSQL backend that can be used in lieu of
@@ -86,9 +79,6 @@ MongoDB.
 The ``view`` purpose has an **experimental** Elasticsearch backend. It
 can be used to create views accessible to other Elasticsearch tools,
 such as Kibana (see :ref:`usage/kibana:IVRE with Kibana`).
-
-The ``flow`` purpose can be used with Neo4j instead of MongoDB for
-historical reasons. This is **deprecated**.
 
 Please refer to the database servers (or your distribution)
 documentation on how to install and configure them.

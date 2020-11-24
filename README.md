@@ -10,13 +10,13 @@
 (Instrument de veille sur les réseaux extérieurs) or DRUNK (Dynamic
 Recon of UNKnown networks) is a network recon framework, including
 tools for passive recon (flow analytics relying on
-[Bro](https://www.bro.org/), [Argus](http://qosient.com/argus/),
-[Nfdump](https://github.com/phaag/nfdump), fingerprint analytics based
-on Bro and [p0f](http://lcamtuf.coredump.cx/p0f/) and active recon
-(IVRE uses [Nmap](http://nmap.org/) to run scans, can use
-[ZMap](https://zmap.io/) as a pre-scanner; IVRE can also import XML
-output from Nmap and
-[Masscan](https://github.com/robertdavidgraham/masscan)).
+[Zeek](https://zeek.org/), [Argus](http://qosient.com/argus/),
+[Nfdump](https://github.com/phaag/nfdump), and active recon (IVRE uses
+[Nmap](http://nmap.org/) to run scans; IVRE can also import XML output
+from Nmap and
+[Masscan](https://github.com/robertdavidgraham/masscan)), and JSON
+output from [ZGrab2](https://github.com/zmap/zgrab2) and
+[ZDNS](https://github.com/zmap/zdns/).
 
 The advertising slogans are:
 
@@ -114,7 +114,7 @@ If you are using IVRE in you research, please cite it as follows:
 Pierre Lalet, Florent Monjalet, Camille Mougey, Vincent Ruello and
 Vivien Venuti. *IVRE, a network recon framework*.
 [https://github.com/cea-sec/ivre](https://github.com/cea-sec/ivre),
-2011-2019.
+2011-2020.
 
 Here is the appropriate bibtex entry:
 
@@ -124,7 +124,7 @@ Here is the appropriate bibtex entry:
         url = {https://ivre.rocks/},
         howpublished = {\url{https://github.com/cea-sec/ivre/}},
         institution = {{CEA}: the French Alternative Energies and Atomic Energy Commission},
-        year = {2011--2019},
+        year = {2011--2020},
     }
 
 ### Technical documents & blog posts ###
@@ -136,7 +136,3 @@ the repository,
 
 On twitter, you can follow and/or mention
 [@IvreRocks](https://twitter.com/IvreRocks).
-
----
-
-This file is part of IVRE. Copyright 2011 - 2019 [Pierre LALET](mailto:pierre.lalet@cea.fr).

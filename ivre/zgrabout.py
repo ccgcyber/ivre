@@ -24,25 +24,32 @@
 
 from future.utils import viewitems
 import re
+import binascii
 
 
 from ivre import utils
-from ivre.xmlnmap import create_ssl_cert
+from ivre.analyzer import ntlm
+from ivre.active.cpe import add_cpe_values
+from ivre.active.data import handle_http_headers
+from ivre.xmlnmap import add_cert_hostnames, add_hostname, \
+    create_elasticsearch_service, create_http_ls, create_ssl_cert
 
 
 _EXPR_TITLE = re.compile('<title[^>]*>([^<]*)</title>', re.I)
-_EXPR_INDEX_OF = re.compile('<title[^>]*> *index +of', re.I)
-_EXPR_FILES = [
-    re.compile('<a href="(?P<filename>[^"]+)">[^<]+</a></td><td[^>]*> *'
-               '(?P<time>[0-9]+-[a-z0-9]+-[0-9]+ [0-9]+:[0-9]+) *'
-               '</td><td[^>]*> *(?P<size>[^<]+)</td>', re.I),
-    re.compile('<a href="(?P<filename>[^"]+)">[^<]+</a> *'
-               '(?P<time>[0-9]+-[a-z0-9]+-[0-9]+ [0-9]+:[0-9]+) *'
-               '(?P<size>[^ \r\n]+)', re.I),
-]
+_EXPR_OWA_VERSION = re.compile('"/owa/(?:auth/)?((?:[0-9]+\\.)+[0-9]+)/')
+_EXPR_CENTREON_VERSION = re.compile(
+    re.escape('<td class="LoginInvitVersion"><br />') +
+    '\\s+((?:[0-9]+\\.)+[0-9]+)\\s+' + re.escape('</td>') + '|' +
+    re.escape('<span>') + '\\s+v\\.\\ ((?:[0-9]+\\.)+[0-9]+)\\s+' +
+    re.escape('</span>')
+)
+
+ntlm_values = ['Target_Name', 'NetBIOS_Domain_Name', 'NetBIOS_Computer_Name',
+               'DNS_Domain_Name', 'DNS_Computer_Name', 'DNS_Tree_Name',
+               'Product_Version', 'NTLM_Version']
 
 
-def zgrap_parser_http(data):
+def zgrap_parser_http(data, hostrec):
     """This function handles data from `{"data": {"http": [...]}}`
 records. `data` should be the content, i.e. the `[...]`. It should
 consist of simple dictionary, that may contain a `"response"` key
@@ -71,102 +78,10 @@ The output is a port dict (i.e., the content of the "ports" key of an
         )
         return {}
     req = resp['request']
-    res = {"service_name": "http", "service_method": "probed",
-           "state_state": "open", "state_reason": "syn-ack", "protocol": "tcp"}
     url = req.get('url')
-    if url:
-        port = None
-        if ':' in url.get('host', ''):
-            try:
-                port = int(url['host'].split(':', 1)[1])
-            except ValueError:
-                pass
-        if port is None:
-            if url.get('scheme') == 'https':
-                port = 443
-            else:
-                port = 80
-    elif req.get('tls_handshake') or req.get('tls_log'):
-        # zgrab / zgrab2
-        port = 443
-    else:
-        port = 80
-    res['port'] = port
-    # Since Zgrab does not preserve the order of the headers, we need
-    # to reconstruct a banner to use Nmap fingerprints
-    banner = (utils.nmap_decode_data(resp['protocol']['name']) + b' ' +
-              utils.nmap_decode_data(resp['status_line']) + b"\r\n")
-    if resp.get('headers'):
-        headers = resp['headers']
-        # the order will be incorrect!
-        http_hdrs = []
-        output = []
-        if 'unknown' in headers:
-            for unk in headers.pop('unknown'):
-                headers[unk['key']] = unk['value']
-        for hdr, values in viewitems(headers):
-            hdr = hdr.replace('_', '-')
-            for val in values:
-                http_hdrs.append({'name': hdr, 'value': val})
-                output.append('%s: %s' % (hdr, val))
-        if http_hdrs:
-            method = req.get('method')
-            if method:
-                output.append('')
-                output.append('(Request type: %s)' % method)
-            res.setdefault('scripts', []).append({
-                'id': 'http-headers', 'output': '\n'.join(output),
-                'http-headers': http_hdrs,
-            })
-        if headers.get('server'):
-            server = resp['headers']['server']
-            res.setdefault('scripts', []).append({
-                'id': 'http-server-header', 'output': server[0],
-                'http-server-header': server,
-            })
-            banner += (b"Server: " + utils.nmap_decode_data(server[0]) +
-                       b"\r\n\r\n")
-    info = utils.match_nmap_svc_fp(banner, proto="tcp", probe="GetRequest")
-    if info:
-        res.update(info)
-    if resp.get('body'):
-        body = resp['body']
-        match = _EXPR_TITLE.search(body)
-        if match is not None:
-            title = match.groups()[0]
-            res.setdefault('scripts', []).append({
-                'id': 'http-title', 'output': title,
-                'http-title': {'title': title},
-            })
-        match = _EXPR_INDEX_OF.search(body)
-        if match is not None:
-            files = []
-            for pattern in _EXPR_FILES:
-                for match in pattern.finditer(body):
-                    files.append(match.groupdict())
-            if files:
-                output = []
-                if url is None or 'path' not in url:
-                    volname = "???"
-                else:
-                    volname = url['path']
-                output.append('Volume %s' % volname)
-                title = ['size', 'time', 'filename']
-                column_width = [len(t) for t in title[:-1]]
-                for fobj in files:
-                    for i, t in enumerate(title[:-1]):
-                        column_width[i] = max(column_width[i],
-                                              len(fobj.get(t, "")))
-                line_fmt = ('%%(size)-%ds  %%(time)-%ds  %%(filename)s' %
-                            tuple(column_width))
-                output.append(line_fmt % dict((t, t.upper()) for t in title))
-                for fobj in files:
-                    output.append(line_fmt % fobj)
-                output.append("")
-                res.setdefault('scripts', []).append({
-                    'id': 'http-ls', 'output': '\n'.join(output),
-                    'ls': {'volumes': [{'volume': volname, 'files': files}]},
-                })
+    res = {"service_name": "http", "service_method": "probed",
+           "state_state": "open", "state_reason": "response",
+           "protocol": "tcp"}
     tls = None
     try:
         tls = req['tls_handshake']
@@ -187,9 +102,201 @@ The output is a port dict (i.e., the content of the "ports" key of an
             if info:
                 res.setdefault('scripts', []).append({
                     'id': 'ssl-cert',
-                    'output': "\n".join(output),
+                    'output': output,
                     'ssl-cert': info,
                 })
+                for cert in info:
+                    add_cert_hostnames(cert,
+                                       hostrec.setdefault('hostnames', []))
+    if url:
+        port = None
+        if ':' in url.get('host', ''):
+            try:
+                port = int(url['host'].split(':', 1)[1])
+            except ValueError:
+                pass
+        if port is None:
+            if url.get('scheme') == 'https':
+                port = 443
+            else:
+                port = 80
+        # Specific paths
+        if url.get('path').endswith('/.git/index'):
+            if resp.get('status_code') != 200:
+                return {}
+            if not resp.get('body', '').startswith('DIRC'):
+                return {}
+            # Due to an issue with ZGrab2 output, we cannot, for now,
+            # process the content of the file. See
+            # <https://github.com/zmap/zgrab2/issues/263>.
+            repository = '%s:%d%s' % (hostrec['addr'], port, url['path'][:-5])
+            res['port'] = port
+            res.setdefault('scripts', []).append({
+                'id': 'http-git',
+                'output': '\n  %s\n    Git repository found!\n' % repository,
+                'http-git': [{'repository': repository,
+                              'files-found': [".git/index"]}],
+            })
+            return res
+        if url.get('path').endswith('/owa/auth/logon.aspx'):
+            if resp.get('status_code') != 200:
+                return {}
+            version = set(
+                m.group(1)
+                for m in _EXPR_OWA_VERSION.finditer(resp.get('body', ''))
+            )
+            if not version:
+                return {}
+            version = sorted(version,
+                             key=lambda v: [int(x) for x in v.split('.')])
+            res['port'] = port
+            path = url['path'][:-15]
+            if len(version) > 1:
+                output = (
+                    'OWA: path %s, version %s (multiple versions found!)' % (
+                        path,
+                        ' / '.join(version),
+                    )
+                )
+            else:
+                output = 'OWA: path %s, version %s' % (path, version[0])
+            res.setdefault('scripts', []).append({
+                'id': 'http-app',
+                'output': output,
+                'http-app': [{'path': path,
+                              'application': 'OWA',
+                              'version': version[0]}],
+            })
+            return res
+        if url.get('path').endswith('/centreon/'):
+            if resp.get('status_code') != 200:
+                return {}
+            if not resp.get('body'):
+                return {}
+            body = resp['body']
+            res['port'] = port
+            path = url['path']
+            match = _EXPR_TITLE.search(body)
+            if match is None:
+                return {}
+            if match.groups()[0] != "Centreon - IT & Network Monitoring":
+                return {}
+            match = _EXPR_CENTREON_VERSION.search(body)
+            if match is None:
+                version = None
+            else:
+                version = match.group(1) or match.group(2)
+            res.setdefault('scripts', []).append({
+                'id': 'http-app',
+                'output': 'Centreon: path %s%s' % (
+                    path,
+                    '' if version is None else (', version %s' % version),
+                ),
+                'http-app': [dict(
+                    {'path': path,
+                     'application': 'Centreon'},
+                    **({} if version is None else {'version': version})
+                )],
+            })
+            return res
+        if url.get('path') != '/':
+            utils.LOGGER.warning('URL path not supported yet: %s',
+                                 url.get('path'))
+            return {}
+    elif req.get('tls_handshake') or req.get('tls_log'):
+        # zgrab / zgrab2
+        port = 443
+    else:
+        port = 80
+    res['port'] = port
+    # Since Zgrab does not preserve the order of the headers, we need
+    # to reconstruct a banner to use Nmap fingerprints
+    banner = (utils.nmap_decode_data(resp['protocol']['name']) + b' ' +
+              utils.nmap_decode_data(resp['status_line']) + b"\r\n")
+    if resp.get('headers'):
+        headers = resp['headers']
+        # Check the Authenticate header first: if we requested it with
+        # an Authorization header, we don't want to gather other information
+        if headers.get('www_authenticate'):
+            auths = headers.get('www_authenticate')
+            for auth in auths:
+                if ntlm._is_ntlm_message(auth):
+                    try:
+                        infos = ntlm.ntlm_extract_info(
+                            utils.decode_b64(auth.split(None, 1)[1].encode()))
+                    except (UnicodeDecodeError, TypeError, ValueError,
+                            binascii.Error):
+                        pass
+                    keyvals = zip(ntlm_values,
+                                  [infos.get(k) for k in ntlm_values])
+                    output = '\n'.join("{}: {}".format(k, v)
+                                       for k, v in keyvals if v)
+                    res.setdefault('scripts', []).append({
+                        'id': 'http-ntlm-info',
+                        'output': output,
+                        'ntlm-info': infos
+                    })
+                    if 'DNS_Computer_Name' in infos:
+                        add_hostname(infos['DNS_Computer_Name'], 'ntlm',
+                                     hostrec.setdefault('hostnames', []))
+        if any(val.lower().startswith('ntlm')
+               for val in req.get('headers', {}).get('authorization', [])):
+            return res
+        # the order will be incorrect!
+        line = '%s %s' % (resp['protocol']['name'], resp['status_line'])
+        http_hdrs = [{'name': '_status', 'value': line}]
+        output = [line]
+        for unk in headers.pop('unknown', []):
+            headers[unk['key']] = unk['value']
+        for hdr, values in viewitems(headers):
+            hdr = hdr.replace('_', '-')
+            for val in values:
+                http_hdrs.append({'name': hdr, 'value': val})
+                output.append('%s: %s' % (hdr, val))
+        if http_hdrs:
+            method = req.get('method')
+            if method:
+                output.append('')
+                output.append('(Request type: %s)' % method)
+            res.setdefault('scripts', []).append({
+                'id': 'http-headers', 'output': '\n'.join(output),
+                'http-headers': http_hdrs,
+            })
+            handle_http_headers(hostrec, res, http_hdrs, path=url.get('path'))
+        if headers.get('server'):
+            banner += (
+                b"Server: " +
+                utils.nmap_decode_data(headers['server'][0]) +
+                b"\r\n\r\n"
+            )
+    info = utils.match_nmap_svc_fp(banner, proto="tcp", probe="GetRequest")
+    if info:
+        add_cpe_values(hostrec, 'ports.port:%s' % port, info.pop('cpe', []))
+        res.update(info)
+    if resp.get('body'):
+        body = resp['body']
+        res.setdefault('scripts', []).append({
+            'id': 'http-content',
+            'output': utils.nmap_encode_data(body.encode()),
+        })
+        match = _EXPR_TITLE.search(body)
+        if match is not None:
+            title = match.groups()[0]
+            res['scripts'].append({
+                'id': 'http-title', 'output': title,
+                'http-title': {'title': title},
+            })
+        script_http_ls = create_http_ls(body, url=url)
+        if script_http_ls is not None:
+            res.setdefault('scripts', []).append(script_http_ls)
+        service_elasticsearch = create_elasticsearch_service(body)
+        if service_elasticsearch:
+            if 'hostname' in service_elasticsearch:
+                add_hostname(service_elasticsearch.pop('hostname'), 'service',
+                             hostrec.setdefault('hostnames', []))
+            add_cpe_values(hostrec, 'ports.port:%s' % port,
+                           service_elasticsearch.pop('cpe', []))
+            res.update(service_elasticsearch)
     return res
 
 

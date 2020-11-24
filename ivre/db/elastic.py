@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -36,8 +36,10 @@ from elasticsearch_dsl.query import Query
 from future.utils import viewitems
 from past.builtins import basestring
 
+
+from ivre.active.data import ALIASES_TABLE_ELEMS
 from ivre.db import DB, DBActive, DBView
-from ivre import utils, xmlnmap
+from ivre import utils
 
 
 PAGESIZE = 250
@@ -231,6 +233,7 @@ class ElasticDBActive(ElasticDB, DBActive):
     nested_fields = [
         "ports",
         "ports.scripts",
+        "ports.scripts.http-app",
         "ports.scripts.http-headers",
         "ports.scripts.ssl-ja3-client",
         "ports.scripts.ssl-ja3-server",
@@ -289,8 +292,18 @@ class ElasticDBActive(ElasticDB, DBActive):
 
         """
         self.db_client.delete(
-            id=host['_id'],
             index=self.indexes[0],
+            id=host['_id'],
+        )
+
+    def remove_many(self, flt):
+        """Removes the host from the active column. `host` must be the record as
+        returned by .get().
+
+        """
+        self.db_client.delete_by_query(
+            index=self.indexes[0],
+            body={"query": flt.to_dict()},
         )
 
     def distinct(self, field, flt=None, sort=None, limit=None, skip=None):
@@ -369,6 +382,7 @@ class ElasticDBActive(ElasticDB, DBActive):
             / script:host:<scriptid>
           - cert.* / smb.* / sshkey.* / ike.*
           - httphdr / httphdr.{name,value} / httphdr:<name>
+          - httpapp / httpapp:<name>
           - modbus.* / s7.* / enip.*
           - mongo.dbs.*
           - vulns.*
@@ -603,7 +617,7 @@ return result;
             elif ":" in info:
                 service, product = info.split(':', 1)
                 flt = self.flt_and(flt, self.searchproduct(
-                    product,
+                    product=product,
                     service=service,
                 ))
                 matchflt = (
@@ -643,7 +657,7 @@ return result;
         elif field == 'httphdr':
             def outputproc(value):
                 return tuple(value.split(':', 1))
-            flt = self.flt_and(flt, self.searchscript(name="http-headers"))
+            flt = self.flt_and(flt, self.searchhttphdr())
             nested = {
                 "nested": {"path": "ports"},
                 "aggs": {"patterns": {
@@ -666,7 +680,7 @@ return result;
                 }},
             }
         elif field.startswith('httphdr.'):
-            flt = self.flt_and(flt, self.searchscript(name="http-headers"))
+            flt = self.flt_and(flt, self.searchhttphdr())
             field = "ports.scripts.http-headers.%s" % field[8:]
             nested = {
                 "nested": {"path": "ports"},
@@ -685,9 +699,7 @@ return result;
             }
         elif field.startswith('httphdr:'):
             subfield = field[8:].lower()
-            flt = self.flt_and(flt,
-                               self.searchscript(name="http-headers",
-                                                 values={"name": subfield}))
+            flt = self.flt_and(flt, self.searchhttphdr(name=subfield))
             nested = {
                 "nested": {"path": "ports"},
                 "aggs": {"patterns": {
@@ -702,6 +714,54 @@ return result;
                                 "terms": dict(
                                     baseterms,
                                     field='ports.scripts.http-headers.value',
+                                ),
+                            }},
+                        }},
+                    }},
+                }},
+            }
+        elif field == 'httpapp':
+            def outputproc(value):
+                return tuple(value.split(':', 1))
+            flt = self.flt_and(flt, self.searchhttpapp())
+            nested = {
+                "nested": {"path": "ports"},
+                "aggs": {"patterns": {
+                    "nested": {"path": "ports.scripts"},
+                    "aggs": {"patterns": {
+                        "nested": {"path": "ports.scripts.http-app"},
+                        "aggs": {"patterns": {
+                            "terms": dict(
+                                baseterms,
+                                script={
+                                    "lang": "painless",
+                                    "source":
+                                    "doc['ports.scripts.http-app.application']"
+                                    ".value + ':' + doc['ports.scripts.http-"
+                                    "app.version'].value"
+                                },
+                            )
+                        }},
+                    }},
+                }},
+            }
+        elif field.startswith('httpapp:'):
+            subfield = field[8:].lower()
+            flt = self.flt_and(flt, self.searchhttpapp(name=subfield))
+            nested = {
+                "nested": {"path": "ports"},
+                "aggs": {"patterns": {
+                    "nested": {"path": "ports.scripts"},
+                    "aggs": {"patterns": {
+                        "nested": {"path": "ports.scripts.http-app"},
+                        "aggs": {"patterns": {
+                            "filter": {"match": {
+                                "ports.scripts.http-app.application": subfield,
+                            }},
+                            "aggs": {"patterns": {
+                                "terms": dict(
+                                    baseterms,
+                                    field='ports.scripts.http-app.version',
                                 ),
                             }},
                         }},
@@ -1046,11 +1106,11 @@ return result;
                                 cls._get_pattern(output)}))
             else:
                 req.append(Q("match", **{"ports.scripts.output": output}))
-        if values is not None:
+        if values:
             if name is None:
                 raise TypeError(".searchscript() needs a `name` arg "
                                 "when using a `values` arg")
-            subfield = xmlnmap.ALIASES_TABLE_ELEMS.get(name, name)
+            subfield = ALIASES_TABLE_ELEMS.get(name, name)
             if isinstance(values, Query):
                 req.append(values)
             elif isinstance(values, basestring):
@@ -1087,6 +1147,8 @@ return result;
     @staticmethod
     def searchservice(srv, port=None, protocol=None):
         """Search an open port with a particular service."""
+        if srv is False:
+            res = ~Q('exists', field="ports.service_name")
         res = Q('match', ports__service_name=srv)
         if port is not None:
             res &= Q('match', ports__port=port)
@@ -1094,24 +1156,35 @@ return result;
             res &= Q('match', ports__protocol=protocol)
         return Q('nested', path='ports', query=res)
 
-    @staticmethod
-    def searchproduct(product, version=None, service=None, port=None,
+    @classmethod
+    def searchproduct(cls, product=None, version=None, service=None, port=None,
                       protocol=None):
         """Search a port with a particular `product`. It is (much)
         better to provide the `service` name and/or `port` number
         since those fields are indexed.
 
         """
-        res = Q('match', ports__service_product=product)
+        res = []
+        if product is not None:
+            if product is False:
+                res.append(~Q('exists', field="ports.service_product"))
+            else:
+                res.append(Q('match', ports__service_product=product))
         if version is not None:
-            res &= Q('match', ports__service_version=version)
+            if version is False:
+                res.append(~Q('exists', field="ports.service_version"))
+            else:
+                res.append(Q('match', ports__service_version=version))
         if service is not None:
-            res &= Q('match', ports__service_name=service)
+            if service is False:
+                res.append(~Q('exists', field="ports.service_name"))
+            else:
+                res.append(Q('match', ports__service_name=service))
         if port is not None:
-            res &= Q('match', ports__port=port)
+            res.append(Q('match', ports__port=port))
         if protocol is not None:
-            res &= Q('match', ports__protocol=protocol)
-        return Q('nested', path='ports', query=res)
+            res.append(Q('match', ports__protocol=protocol))
+        return Q('nested', path='ports', query=cls.flt_and(*res))
 
 
 class ElasticDBView(ElasticDBActive, DBView):

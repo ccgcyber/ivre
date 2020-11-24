@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
 
 """
 This module is part of IVRE.
-Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 
 Standard setup.py file. Run
 
@@ -124,10 +124,10 @@ setup(
     description='Network recon framework',
     long_description=long_description,
     long_description_content_type=long_description_content_type,
-    keywords=["network", "network recon", "network cartography",
-              "nmap", "masscan", "zmap", "bro", "zeek", "p0f"],
+    keywords=["network", "network recon", "network cartography", "nmap",
+              "masscan", "zmap", "zgrab", "zdns", "bro", "zeek"],
     classifiers=[
-        "Development Status :: 4 - Beta",
+        "Development Status :: 5 - Production/Stable",
         "Environment :: Console",
         "Environment :: Web Environment",
         "Intended Audience :: Developers",
@@ -138,29 +138,28 @@ setup(
         "License :: OSI Approved :: "
         "GNU General Public License v3 or later (GPLv3+)",
         "Programming Language :: Python :: 2",
-        "Programming Language :: Python :: 2.6",
         "Programming Language :: Python :: 2.7",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.4",
         "Programming Language :: Python :: 3.5",
         "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
         "Topic :: Scientific/Engineering :: Information Analysis",
         "Topic :: Security",
         "Topic :: System :: Networking",
         "Topic :: System :: Networking :: Monitoring",
         "Topic :: System :: Software Distribution",
     ],
-    python_requires='>=2.6, !=3.0.*, !=3.1.*, !=3.2.*, <4',
+    python_requires='>=2.7, !=3.0.*, !=3.1.*, !=3.2.*, <4',
     install_requires=[
-        'pycrypto',
+        'cryptography',
         'pymongo>=2.7.2',
         'pyOpenSSL>=16.1.0',
         'future',
         'bottle',
     ],
     extras_require={
-        'Flow with Neo4j (deprecated)': ["py2neo>=3,<4"],
         'TinyDB (experimental)': ["tinydb"],
         'PostgreSQL (experimental)': ["sqlalchemy", "psycopg2"],
         'Elasticsearch (experimental)': ["elasticsearch", "elasticsearch-dsl"],
@@ -170,21 +169,11 @@ setup(
         '3D traceroute graphs': ["dbus-python"],
         'Plots': ["matplotlib"],
     },
-    packages=['ivre', 'ivre/analyzer', 'ivre/db', 'ivre/db/sql', 'ivre/parser',
-              'ivre/tools', 'ivre/web'],
+    packages=['ivre', 'ivre/active', 'ivre/analyzer', 'ivre/db', 'ivre/db/sql',
+              'ivre/parser', 'ivre/tools', 'ivre/web'],
     scripts=['bin/ivre'],
     data_files=[
         ('', ['README.md']),  # needed for the package description
-        ('share/ivre/bro',
-         ['bro/passiverecon2db-ignore.example']),
-        ('share/ivre/bro/ivre',
-         ['bro/ivre/__load__.bro']),
-        ('share/ivre/bro/ivre/arp',
-         ['bro/ivre/arp/__load__.bro']),
-        ('share/ivre/bro/ivre/passiverecon',
-         ['bro/ivre/passiverecon/__load__.bro',
-          'bro/ivre/passiverecon/bare.bro',
-          'bro/ivre/passiverecon/ja3.bro']),
         ('share/ivre/zeek',
          ['zeek/passiverecon2db-ignore.example']),
         ('share/ivre/zeek/ivre',
@@ -194,6 +183,7 @@ setup(
         ('share/ivre/zeek/ivre/passiverecon',
          ['zeek/ivre/passiverecon/__load__.zeek',
           'zeek/ivre/passiverecon/bare.zeek',
+          'zeek/ivre/passiverecon/hassh.zeek',
           'zeek/ivre/passiverecon/ja3.zeek']),
         ('share/ivre/honeyd', ['data/.empty']),
         ('share/ivre/geoip', ['data/.empty']),

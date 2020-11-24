@@ -200,6 +200,16 @@ def get_init_flt(dbase):
     return _parse_query(dbase, config.WEB_DEFAULT_INIT_QUERY)
 
 
+def str2regexpnone(value):
+    """Just like str2regexp, but handle special '-' value, which means
+False.
+
+    """
+    if value == '-':
+        return False
+    return utils.str2regexp(value)
+
+
 def flt_from_query(dbase, query, base_flt=None):
     """Return a tuple (`flt`, `sortby`, `unused`, `skip`, `limit`):
 
@@ -301,27 +311,27 @@ def flt_from_query(dbase, query, base_flt=None):
                 port = int(port)
                 flt = dbase.flt_and(
                     flt,
-                    dbase.searchservice(utils.str2regexp(req), port=port))
+                    dbase.searchservice(str2regexpnone(req), port=port))
             else:
                 flt = dbase.flt_and(
                     flt,
-                    dbase.searchservice(utils.str2regexp(value)))
+                    dbase.searchservice(str2regexpnone(value)))
         elif not neg and param == "product" and ":" in value:
             product = value.split(':', 2)
             if len(product) == 2:
                 flt = dbase.flt_and(
                     flt,
                     dbase.searchproduct(
-                        utils.str2regexp(product[1]),
-                        service=utils.str2regexp(product[0])
+                        product=str2regexpnone(product[1]),
+                        service=str2regexpnone(product[0])
                     )
                 )
             else:
                 flt = dbase.flt_and(
                     flt,
                     dbase.searchproduct(
-                        utils.str2regexp(product[1]),
-                        service=utils.str2regexp(product[0]),
+                        product=str2regexpnone(product[1]),
+                        service=str2regexpnone(product[0]),
                         port=int(product[2])
                     )
                 )
@@ -331,18 +341,18 @@ def flt_from_query(dbase, query, base_flt=None):
                 flt = dbase.flt_and(
                     flt,
                     dbase.searchproduct(
-                        utils.str2regexp(product[1]),
-                        version=utils.str2regexp(product[2]),
-                        service=utils.str2regexp(product[0]),
+                        product=str2regexpnone(product[1]),
+                        version=str2regexpnone(product[2]),
+                        service=str2regexpnone(product[0]),
                     )
                 )
             else:
                 flt = dbase.flt_and(
                     flt,
                     dbase.searchproduct(
-                        utils.str2regexp(product[1]),
-                        version=utils.str2regexp(product[2]),
-                        service=utils.str2regexp(product[0]),
+                        product=str2regexpnone(product[1]),
+                        version=str2regexpnone(product[2]),
+                        service=str2regexpnone(product[0]),
                         port=int(product[3])
                     )
                 )
@@ -442,22 +452,47 @@ def flt_from_query(dbase, query, base_flt=None):
                 add_unused(neg, param, value)
         elif not neg and param == 'cert':
             flt = dbase.flt_and(flt, dbase.searchcert())
-        elif not neg and param.startswith('cert.'):
+        elif param.startswith('cert.'):
             subfield = param.split('.', 1)[1]
-            if subfield in ['md5', 'sha1', 'sha256']:
-                flt = dbase.flt_and(flt, dbase.searchcert(**{subfield: value}))
+            if subfield == 'self_signed' and value is None:
+                flt = dbase.flt_and(flt, dbase.searchcert(self_signed=not neg))
+            elif not neg:
+                if subfield in ['md5', 'sha1', 'sha256', 'subject', 'issuer']:
+                    flt = dbase.flt_and(flt, dbase.searchcert(**{
+                        subfield: utils.str2regexp(value),
+                    }))
+                elif subfield in ['pubkey.md5', 'pubkey.sha1',
+                                  'pubkey.sha256']:
+                    flt = dbase.flt_and(flt, dbase.searchcert(**{
+                        'pk%s' % subfield[7:]: utils.str2regexp(value),
+                    }))
+                else:
+                    add_unused(neg, param, value)
             else:
                 add_unused(neg, param, value)
         elif not neg and param == 'httphdr':
             if value is None:
                 flt = dbase.flt_and(flt, dbase.searchhttphdr())
             elif ':' in value:
-                name, value = (utils.str2regexp(string) for
-                               string in value.split(':', 1))
+                name, value = value.split(':', 1)
+                name = utils.str2regexp(name.lower())
+                value = utils.str2regexp(value)
                 flt = dbase.flt_and(flt, dbase.searchhttphdr(name=name,
                                                              value=value))
             else:
                 flt = dbase.flt_and(flt, dbase.searchhttphdr(
+                    name=utils.str2regexp(value.lower())
+                ))
+        elif not neg and param == 'httpapp':
+            if value is None:
+                flt = dbase.flt_and(flt, dbase.searchhttpapp())
+            elif ':' in value:
+                name, version = (utils.str2regexp(string) for
+                                 string in value.split(':', 1))
+                flt = dbase.flt_and(flt, dbase.searchhttpapp(name=name,
+                                                             version=version))
+            else:
+                flt = dbase.flt_and(flt, dbase.searchhttpapp(
                     name=utils.str2regexp(value)
                 ))
         elif not neg and param == 'owa':

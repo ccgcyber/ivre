@@ -61,13 +61,14 @@ else:
 import ivre
 import ivre.config
 import ivre.db
+import ivre.flow
 import ivre.mathutils
-import ivre.parser.bro
+import ivre.parser.zeek
 import ivre.parser.iptables
 import ivre.passive
+import ivre.target
 import ivre.utils
 import ivre.web.utils
-import ivre.flow
 import ivre.xmlnmap
 
 HTTPD_PORT = 18080
@@ -94,14 +95,15 @@ def run_iter(cmd, interp=None, stdin=None, stdout=subprocess.PIPE,
                             env=env)
 
 
-def run_cmd(cmd, interp=None, stdin=None, env=None):
-    proc = run_iter(cmd, interp=interp, stdin=stdin, env=env)
+def run_cmd(cmd, interp=None, stdin=None, stdout=subprocess.PIPE, env=None):
+    proc = run_iter(cmd, interp=interp, stdin=stdin, stdout=stdout, env=env)
     out, err = proc.communicate()
     return proc.returncode, out, err
 
 
-def python_run(cmd, stdin=None, env=None):
-    return run_cmd(cmd, interp=[sys.executable], stdin=stdin, env=env)
+def python_run(cmd, stdin=None, stdout=subprocess.PIPE, env=None):
+    return run_cmd(cmd, interp=[sys.executable], stdin=stdin, stdout=stdout,
+                   env=env)
 
 
 def python_run_iter(cmd, stdin=None, stdout=subprocess.PIPE,
@@ -110,9 +112,9 @@ def python_run_iter(cmd, stdin=None, stdout=subprocess.PIPE,
                     stderr=stderr)
 
 
-def coverage_run(cmd, stdin=None, env=None):
+def coverage_run(cmd, stdin=None, stdout=subprocess.PIPE, env=None):
     return run_cmd(cmd, interp=COVERAGE + ["run", "--parallel-mode"],
-                   stdin=stdin, env=env)
+                   stdin=stdin, stdout=stdout, env=env)
 
 
 def coverage_run_iter(cmd, stdin=None, stdout=subprocess.PIPE,
@@ -126,7 +128,7 @@ def run_passiverecon_worker(bulk_mode=None):
     pid = os.fork()
     if pid < 0:
         raise Exception("Cannot fork")
-    elif pid:
+    if pid:
         # Wait for child process to handle every file in "logs"
         while any(walk[2] for walk in os.walk("logs")):
             print(u"Waiting for passivereconworker")
@@ -260,9 +262,11 @@ class IvreTests(unittest.TestCase):
     def setUp(self):
         try:
             with open(os.path.join(SAMPLES, "results")) as fdesc:
-                self.results = dict([l[:l.index(' = ')],
-                                     literal_eval(l[l.index(' = ') + 3:-1])]
-                                    for l in fdesc if ' = ' in l)
+                self.results = {
+                    line[:line.index(' = ')]:
+                    literal_eval(line[line.index(' = ') + 3:-1])
+                    for line in fdesc if ' = ' in line
+                }
         except IOError as exc:
             if exc.errno != errno.ENOENT:
                 raise exc
@@ -397,7 +401,7 @@ class IvreTests(unittest.TestCase):
                              **kwargs):
         res, out, err = RUN(["ivre", command, "--top", field, "--limit",
                              str(count)])
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(res, 0)
         listval = []
         for line in out.decode().split('\n'):
@@ -468,7 +472,7 @@ class IvreTests(unittest.TestCase):
             cmd += ['--collect'] + collect_fields
         res, out, err = RUN(cmd)
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         # Check only fields and count
         result = out.decode().rsplit('|', 1)[0]
         self.check_value(name, result)
@@ -660,6 +664,8 @@ purposes to feed Elasticsearch view.
         if DATABASE != "elastic":
             return
         subprocess.check_call(["mongorestore", "--db", "ivre", "../backup/"])
+        for cmd in ["scancli", "ipinfo"]:
+            RUN(["ivre", cmd, "--update-schema"])
 
     def test_30_nmap(self):
 
@@ -680,9 +686,12 @@ purposes to feed Elasticsearch view.
 
         def host_stored_test(line):
             try:
-                return len(json.loads(line.decode()))
+                data = json.loads(line.decode())
             except ValueError:
                 return 0
+            if isinstance(data, dict):
+                return 1
+            return 0
         scan_duplicate = re.compile(b"^DEBUG:ivre:Scan already present in "
                                     b"Database", re.M)
         for fname in self.nmap_files:
@@ -693,6 +702,9 @@ purposes to feed Elasticsearch view.
                 options.extend(["--masscan-probes", fname.split('-probe-')[1]])
             options.extend(["--", fname])
             res, _, err = RUN(options)
+            print("Inserting %r" % fname)
+            if res:
+                print("Error: %r" % err)
             self.assertEqual(res, 0)
             host_counter += sum(1 for _ in host_stored.finditer(err))
             scan_counter += sum(1 for _ in scan_stored.finditer(err))
@@ -866,17 +878,17 @@ purposes to feed Elasticsearch view.
         # JSON
         res, out, err = RUN(['ivre', 'scancli', '--json'])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(len(out.splitlines()), hosts_count)
         # SHORT
         res, out, err = RUN(['ivre', 'scancli', '--short'])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(len(out.splitlines()), hosts_count)
         # GNMAP
         res, out, err = RUN(['ivre', 'scancli', '--gnmap'])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         count = sum(1 for line in out.splitlines() if b'Status: Up' in line)
         self.assertEqual(count, hosts_count)
 
@@ -918,8 +930,8 @@ purposes to feed Elasticsearch view.
 
         self.check_nmap_count_value(
             "nmap_extended_eu_count",
-            ivre.db.db.nmap.searchcountry(['EU', 'CH', 'NO']),
-            ["--country=EU,CH,NO"], "country:EU,CH,NO"
+            ivre.db.db.nmap.searchcountry(['EU', 'GB', 'CH', 'NO']),
+            ["--country=EU,GB,CH,NO"], "country:EU,GB,CH,NO"
         )
 
         # Filters
@@ -954,44 +966,49 @@ purposes to feed Elasticsearch view.
                                     ivre.db.db.nmap.searchhost("127.12.34.56"),
                                     ["--host", "127.12.34.56"], "127.12.34.56")
 
-        generator = iter(ivre.db.db.nmap.get(ivre.db.db.nmap.flt_empty))
-        addrrange = sorted((x['addr'] for x in [next(generator),
-                                                next(generator)]),
-                           key=ivre.utils.force_ip2int)
-        addr_range_count = self.check_nmap_count_value(
-            None, ivre.db.db.nmap.searchrange(*addrrange),
-            ["--range"] + addrrange,
-            "range:%s-%s" % tuple(addrrange),
-        )
-        self.assertGreaterEqual(addr_range_count, 2)
-        self.check_count_value_api(
-            hosts_count - addr_range_count,
-            ivre.db.db.nmap.searchrange(*addrrange, neg=True),
-            database=ivre.db.db.nmap
-        )
-        count = sum(
-            ivre.db.db.nmap.count(ivre.db.db.nmap.searchnet(net))
-            for net in ivre.utils.range2nets(addrrange)
-        )
-        self.assertEqual(count, addr_range_count)
-
-        addrs = set(
-            addr
-            for net in ivre.utils.range2nets(addrrange)
-            for addr in ivre.db.db.nmap.distinct(
-                "addr", flt=ivre.db.db.nmap.searchnet(net),
+        for flt in [ivre.db.db.nmap.searchipv4(),
+                    ivre.db.db.nmap.searchipv6()]:
+            generator = iter(ivre.db.db.nmap.get(flt))
+            try:
+                addrrange = sorted((x['addr'] for x in [next(generator),
+                                                        next(generator)]),
+                                   key=ivre.utils.force_ip2int)
+            except StopIteration:
+                continue
+            addr_range_count = self.check_nmap_count_value(
+                None, ivre.db.db.nmap.searchrange(*addrrange),
+                ["--range"] + addrrange,
+                "range:%s-%s" % tuple(addrrange),
             )
-        )
-        self.assertTrue(len(addrs) <= addr_range_count)
+            self.assertGreaterEqual(addr_range_count, 2)
+            self.check_count_value_api(
+                hosts_count - addr_range_count,
+                ivre.db.db.nmap.searchrange(*addrrange, neg=True),
+                database=ivre.db.db.nmap
+            )
+            count = sum(
+                ivre.db.db.nmap.count(ivre.db.db.nmap.searchnet(net))
+                for net in ivre.utils.range2nets(addrrange)
+            )
+            self.assertEqual(count, addr_range_count)
 
-        count = ivre.db.db.nmap.count(
-            ivre.db.db.nmap.searchhosts(addrrange)
-        )
-        self.assertEqual(count, 2)
-        count_cmpl = ivre.db.db.nmap.count(
-            ivre.db.db.nmap.searchhosts(addrrange, neg=True)
-        )
-        self.assertEqual(count + count_cmpl, hosts_count)
+            addrs = set(
+                addr
+                for net in ivre.utils.range2nets(addrrange)
+                for addr in ivre.db.db.nmap.distinct(
+                    "addr", flt=ivre.db.db.nmap.searchnet(net),
+                )
+            )
+            self.assertTrue(len(addrs) <= addr_range_count)
+
+            count = ivre.db.db.nmap.count(
+                ivre.db.db.nmap.searchhosts(addrrange)
+            )
+            self.assertEqual(count, 2)
+            count_cmpl = ivre.db.db.nmap.count(
+                ivre.db.db.nmap.searchhosts(addrrange, neg=True)
+            )
+            self.assertEqual(count + count_cmpl, hosts_count)
 
         count = ivre.db.db.nmap.count(
             ivre.db.db.nmap.searchtimerange(
@@ -1138,7 +1155,7 @@ purposes to feed Elasticsearch view.
 
         # Indexes
         addr = next(iter(ivre.db.db.nmap.get(
-            ivre.db.db.nmap.flt_empty
+            ivre.db.db.nmap.searchipv4()
         )))['addr']
         addr_net = '.'.join(addr.split('.')[:3]) + '.0/24'
         queries = [
@@ -1318,11 +1335,11 @@ purposes to feed Elasticsearch view.
                     found = False
                     for port in host['ports']:
                         for script in port.get('scripts', []):
-                            if script['id'] == 'ssl-cert' and script.get(
-                                    'ssl-cert', {}
-                            ).get(hashtype) == val:
-                                found = True
-                                break
+                            if script['id'] == 'ssl-cert':
+                                for cert in script.get('ssl-cert', []):
+                                    if cert.get(hashtype) == val:
+                                        found = True
+                                        break
                         if found:
                             break
                     self.assertTrue(found)
@@ -1551,7 +1568,7 @@ purposes to feed Elasticsearch view.
 
         res, out, err = RUN(["ivre", "scancli", "--count"], env=newenv)
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.check_value("nmap_get_count", int(out))
 
         addr = next(iter(ivre.db.db.nmap.get(
@@ -1559,7 +1576,7 @@ purposes to feed Elasticsearch view.
         )))['addr']
         res, out, err = RUN(["ivre", "scancli", "--host", addr], env=newenv)
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         found = False
         for line in out.splitlines():
             if line.startswith(b'Host '):
@@ -1584,6 +1601,15 @@ purposes to feed Elasticsearch view.
             ivre.db.db.nmap.searchhost(addr)
         )
         self.assertEqual(count, 0)
+        addr = next(iter(ivre.db.db.nmap.get(
+            ivre.db.db.nmap.flt_empty,
+            sort=[('addr', -1)])
+        ))['addr']
+        ivre.db.db.nmap.remove_many(ivre.db.db.nmap.searchhost(addr))
+        count = ivre.db.db.nmap.count(
+            ivre.db.db.nmap.searchhost(addr)
+        )
+        self.assertEqual(count, 0)
 
     def test_40_passive(self):
 
@@ -1600,28 +1626,24 @@ purposes to feed Elasticsearch view.
                              stdin=open(os.devnull))[0], 0)
         self.assertEqual(RUN(["ivre", "ipinfo", "--count"])[1], b"0\n")
 
-        # p0f & Bro insertion
+        # Zeek insertion
         ivre.utils.makedirs("logs")
-        broenv = os.environ.copy()
-        broenv["LOG_ROTATE"] = "60"
-        broenv["LOG_PATH"] = "logs/TEST"
+        zeekenv = os.environ.copy()
+        zeekenv["LOG_ROTATE"] = "60"
+        zeekenv["LOG_PATH"] = "logs/TEST"
 
         for fname in self.pcap_files:
-            for mode in ivre.passive.P0F_MODES:
-                res = RUN(["ivre", "p0f2db", "-s", "TEST", "-m", mode,
-                           bulk_mode, fname])[0]
-                self.assertEqual(res, 0)
-            broprocess = subprocess.Popen(
-                ['bro', '-C', '-b', '-r', fname,
+            zeekprocess = subprocess.Popen(
+                ['zeek', '-C', '-b', '-r', fname,
                  os.path.join(
-                     ivre.config.guess_prefix('bro'),
-                     'ivre', 'passiverecon', 'bare.bro',
+                     ivre.config.guess_prefix('zeek'),
+                     'ivre', 'passiverecon', 'bare.zeek',
                  ),
                  '-e',
                  'redef tcp_content_deliver_all_resp = T; '
                  'redef tcp_content_deliver_all_orig = T;'],
-                env=broenv)
-            broprocess.wait()
+                env=zeekenv)
+            zeekprocess.wait()
 
         run_passiverecon_worker(bulk_mode=bulk_mode)
 
@@ -1635,19 +1657,19 @@ purposes to feed Elasticsearch view.
         # MAC addresses
         ret, out, err = RUN(["ivre", "macinfo", "--count"])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         out = int(out.strip())
         self.assertGreater(out, 0)
         self.check_value("passive_count_mac", out)
         ret, out, err = RUN(["ivre", "macinfo", "-s", "TEST", "--count"])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         out = int(out.strip())
         self.assertGreater(out, 0)
         self.check_value("passive_count_mac", out)
         ret, out, err = RUN(["ivre", "macinfo"])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         out = out.splitlines()
         self.check_value("passive_count_mac", len(out))
         out = out[0].split()
@@ -1657,22 +1679,22 @@ purposes to feed Elasticsearch view.
         mac_addr = out[2]
         ret, out, err = RUN(["ivre", "macinfo", "-r"])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.check_value("passive_count_mac", len(out.splitlines()))
         ret, out, err = RUN(["ivre", "macinfo", ip_addr.decode()])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertTrue(ip_addr in out)
         self.assertTrue(mac_addr in out)
         ret, out, err = RUN(["ivre", "macinfo", mac_addr.decode()])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertTrue(ip_addr in out)
         self.assertTrue(mac_addr in out)
         ret, out, err = RUN(["ivre", "macinfo", ip_addr.decode(),
                              mac_addr.decode()])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertTrue(ip_addr in out)
         self.assertTrue(mac_addr in out)
         ret, out, err = RUN([
@@ -1680,14 +1702,14 @@ purposes to feed Elasticsearch view.
             '/^%s:/' % ':'.join(mac_addr.decode().split(':', 4)[:4])
         ])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertTrue(ip_addr in out)
         self.assertTrue(mac_addr in out)
         # Multicast addresses should not be seen as belonging to hosts
         ret, out, err = RUN(["ivre", "macinfo", "/^01:/"])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
-        self.assertTrue(not out)
+        self.assertFalse(err)
+        self.assertFalse(out)
 
         # Filters
         addr = ivre.db.db.passive.get_one(
@@ -1702,7 +1724,7 @@ purposes to feed Elasticsearch view.
             addr if isinstance(addr, basestring) else ivre.utils.int2ip(addr),
         ])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(int(out.strip()), result)
         ret, out, err = RUN([
             "ivre", "ipinfo",
@@ -1711,7 +1733,7 @@ purposes to feed Elasticsearch view.
         self.assertEqual(ret, 0)
         if DATABASE not in ['postgres', 'sqlite']:
             # There is a warning in postgresql for unused argument.
-            self.assertTrue(not err)
+            self.assertFalse(err)
         self.assertGreater(out.count(b'\n'), result)
 
         result = ivre.db.db.passive.count(
@@ -1788,14 +1810,14 @@ purposes to feed Elasticsearch view.
         )
         self.check_value("passive_torcert_count", count)
         count = ivre.db.db.passive.count(
-            ivre.db.db.passive.searchcertsubject(
-                re.compile('google', re.I)
+            ivre.db.db.passive.searchcert(
+                subject=re.compile('google', re.I)
             )
         )
         self.check_value("passive_cert_google", count)
         count = ivre.db.db.passive.count(
-            ivre.db.db.passive.searchcertsubject(
-                re.compile('microsoft', re.I)
+            ivre.db.db.passive.searchcert(
+                subject=re.compile('microsoft', re.I)
             )
         )
         self.check_value("passive_cert_microsoft", count)
@@ -1867,39 +1889,55 @@ purposes to feed Elasticsearch view.
 
         for service, product in [('ssh', 'Cisco SSH'),
                                  ('http', 'Apache httpd'),
-                                 ('imap', 'Microsoft Exchange imapd')]:
-            flt = ivre.db.db.passive.searchproduct(product, service=service)
+                                 ('imap', 'Microsoft Exchange imapd'),
+                                 ('imap', False)]:
+            flt = ivre.db.db.passive.searchproduct(product=product,
+                                                   service=service)
             count = ivre.db.db.passive.count(flt)
             self.check_value(
-                "passive_count_%s_%s" % (service, product.replace(' ', '')),
+                "passive_count_%s_%s" % (
+                    service, (product or "UNKNOWN").replace(' ', ''),
+                ),
                 count,
             )
             for res in ivre.db.db.passive.get(flt):
-                self.assertTrue(res['infos']['service_name'] == service)
-                self.assertTrue(res['infos']['service_product'] == product)
+                self.assertEqual(res['infos']['service_name'], service)
+                if product:
+                    self.assertEqual(res['infos']['service_product'], product)
+                else:
+                    self.assertFalse('service_product' in res['infos'])
 
         for service, product, version in [
                 ('ssh', 'Cisco SSH', "1.25"),
-                ('ssh', 'OpenSSH', '3.1p1')
+                ('ssh', 'OpenSSH', '3.1p1'),
+                ('ssh', 'OpenSSH', False),
         ]:
-            flt = ivre.db.db.passive.searchproduct(product, service=service,
+            flt = ivre.db.db.passive.searchproduct(product=product,
+                                                   service=service,
                                                    version=version)
             count = ivre.db.db.passive.count(flt)
             self.check_value(
-                "passive_count_%s_%s_%s" % (service, product.replace(' ', ''),
-                                            version.replace('.', '_')),
+                "passive_count_%s_%s_%s" % (
+                    service,
+                    product.replace(' ', ''),
+                    (version or "UNKNOWN").replace('.', '_'),
+                ),
                 count,
             )
             for res in ivre.db.db.passive.get(flt):
-                self.assertTrue(res['infos']['service_name'] == service)
-                self.assertTrue(res['infos']['service_product'] == product)
-                self.assertTrue(res['infos']['service_version'] == version)
+                self.assertEqual(res['infos']['service_name'], service)
+                self.assertEqual(res['infos']['service_product'], product)
+                if version:
+                    self.assertEqual(res['infos']['service_version'], version)
+                else:
+                    self.assertFalse('service_version' in res['infos'])
 
         for service, product, port in [
                 ('ssh', 'Cisco SSH', 22),
                 ('ssh', 'OpenSSH', 22)
         ]:
-            flt = ivre.db.db.passive.searchproduct(product, service=service,
+            flt = ivre.db.db.passive.searchproduct(product=product,
+                                                   service=service,
                                                    port=port)
             count = ivre.db.db.passive.count(flt)
             self.check_value(
@@ -1918,48 +1956,50 @@ purposes to feed Elasticsearch view.
         self.assertEqual(res, 0)
         if DATABASE not in ['postgres', 'sqlite']:
             # There is a warning in postgresql for unused argument.
-            self.assertTrue(not err)
+            self.assertFalse(err)
         self.assertEqual(out, b'')
 
         res, out, err = RUN(["ivre", "ipinfo", "--timeago", "10000000000"])
         self.assertEqual(res, 0)
         if DATABASE not in ['postgres', 'sqlite']:
             # There is a warning in postgresql for unused argument.
-            self.assertTrue(not err)
+            self.assertFalse(err)
         self.assertNotEqual(out, b'')
 
         res, out, err = RUN(["ivre", "ipinfo", "--timeago", "0", "--count"])
         self.assertEqual(res, 0)
         if DATABASE not in ['postgres', 'sqlite']:
             # There is a warning in postgresql for unused argument.
-            self.assertTrue(not err)
+            self.assertFalse(err)
         self.assertEqual(out, b'0\n')
 
         res, out, err = RUN(["ivre", "ipinfo",
                              "--timeago", "10000000000",
                              "--count"])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertNotEqual(out, b'')
         self.check_value("passive_count", int(out))
 
         # Top values
         for distinct in [True, False]:
-            cur = iter(ivre.db.db.passive.topvalues(field="addr",
-                                                    distinct=distinct,
-                                                    topnbr=2))
-            values = next(cur)
-            while values.get('_id') is None:
+            for field in ["addr", "domains", "domains:2"]:
+                if DATABASE == "sqlite" and field.startswith('domains'):
+                    # BUG in sqlite backend: cannot use topvalues with
+                    # JSON fields
+                    continue
+                valname = "passive_top_%s_%sdistinct" % (
+                    field.replace(':', '_'),
+                    "" if distinct else "not_",
+                )
+                cur = iter(ivre.db.db.passive.topvalues(field=field,
+                                                        distinct=distinct,
+                                                        topnbr=2))
                 values = next(cur)
-            self.check_value(
-                "passive_top_addr_%sdistinct" % ("" if distinct else "not_"),
-                values["_id"],
-            )
-            self.check_value(
-                "passive_top_addr_%sdistinct_count" % ("" if distinct
-                                                       else "not_"),
-                values["count"],
-            )
+                while values.get('_id') is None:
+                    values = next(cur)
+                self.check_value(valname, values["_id"])
+                self.check_value("%s_count" % valname, values["count"])
         for field, key in [('value', 'ja3cli_md5'),
                            ('infos.raw', 'ja3cli_raw'),
                            ('infos.sha1', 'ja3cli_sha1'),
@@ -2047,21 +2087,47 @@ purposes to feed Elasticsearch view.
                         break
                 else:
                     self.assertTrue(False)
+                # Test to find client with cli
+                if clival is not None:
+                    res, out, err = RUN(["ivre", "ipinfo", "--ssl-ja3-client",
+                                         str(clival)])
+                    self.assertEqual(res, 0)
+                    self.assertFalse(err)
+                    out = out.decode().splitlines()
+                    self.assertTrue(len(out) >= 1)
+                # Test to find server with cli
+                if value is not None:
+                    res, out, err = RUN(["ivre", "ipinfo", "--ssl-ja3-server",
+                                         str(value)])
+                    self.assertEqual(res, 0)
+                    self.assertFalse(err)
+                    out = out.decode().splitlines()
+                    self.assertTrue(len(out) >= 1)
+                # Test to find (client, server) with cli
+                if clival is not None and value is not None:
+                    res, out, err = RUN(["ivre", "ipinfo", "--ssl-ja3-server",
+                                         "%s:%s" % (value, clival)])
+                    self.assertEqual(res, 0)
+                    self.assertFalse(err)
+                    out = out.decode().splitlines()
+                    self.assertTrue(len(out) >= 1)
                 # Run a new test for raw values using regular
                 # expressions
                 newtest = False
+                newvalue = value
+                newclival = clival
                 if value == rec1['infos']['raw']:
-                    value = re.compile('^' + re.escape(value) + '$')
+                    newvalue = re.compile('^' + re.escape(value) + '$')
                     newtest = True
                 if clival == rec1['infos']['client']['raw']:
-                    clival = re.compile('^' + re.escape(clival) + '$')
+                    newclival = re.compile('^' + re.escape(clival) + '$')
                     newtest = True
                 if not newtest:
                     continue
                 for rec2 in ivre.db.db.passive.get(
                     ivre.db.db.passive.searchja3server(
-                        value_or_hash=value,
-                        client_value_or_hash=clival,
+                        value_or_hash=newvalue,
+                        client_value_or_hash=newclival,
                     )
                 ):
                     if rec1 == rec2:
@@ -2071,13 +2137,13 @@ purposes to feed Elasticsearch view.
 
         # Top values (CLI)
         res, out, err = RUN(["ivre", "ipinfo", "--top", "addr"])
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(res, 0)
         out = out.decode().splitlines()
         self.assertEqual(len(out), 10)
         res, out, err = RUN(["ivre", "ipinfo", "--limit", "2", "--top",
                              "addr"])
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(res, 0)
         out = out.decode().splitlines()
         self.assertEqual(len(out), 2)
@@ -2086,7 +2152,7 @@ purposes to feed Elasticsearch view.
         self.check_value("passive_top_addr_distinct", addr)
         self.check_value("passive_top_addr_distinct_count", int(count))
         res, out, err = RUN(["ivre", "ipinfo", "--top", "addr"])
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(res, 0)
         addr, count = next(elt for elt in out.decode().splitlines()
                            if not elt.startswith('None: ')).split(': ')
@@ -2098,7 +2164,7 @@ purposes to feed Elasticsearch view.
         res, _, err = RUN(["ivre", "ipinfo", "--limit", "1"])
         if DATABASE not in ['postgres', 'sqlite']:
             # There is a warning in postgresql for unused argument.
-            self.assertTrue(not err)
+            self.assertFalse(err)
         self.assertEqual(res, 0)
         # Using --limit n with --json should produce at most n JSON
         # lines
@@ -2107,7 +2173,7 @@ purposes to feed Elasticsearch view.
                                  "--json"])
             if DATABASE not in ['postgres', 'sqlite']:
                 # There is a warning in postgresql for unused argument.
-                self.assertTrue(not err)
+                self.assertFalse(err)
             self.assertEqual(res, 0)
             out = out.decode().splitlines()
             self.assertEqual(len(out), count)
@@ -2120,7 +2186,7 @@ purposes to feed Elasticsearch view.
                                      "--skip", str(skip), "--json"])
                 if DATABASE not in ['postgres', 'sqlite']:
                     # There is a warning in postgresql for unused argument.
-                    self.assertTrue(not err)
+                    self.assertFalse(err)
                 self.assertEqual(res, 0)
                 out = out.decode().splitlines()
                 self.assertEqual(len(out), count)
@@ -2129,20 +2195,20 @@ purposes to feed Elasticsearch view.
         res, out1, err = RUN(["ivre", "ipinfo", "--limit", "1", "--json"])
         if DATABASE not in ['postgres', 'sqlite']:
             # There is a warning in postgresql for unused argument.
-            self.assertTrue(not err)
+            self.assertFalse(err)
         self.assertEqual(res, 0)
         res, out2, err = RUN(["ivre", "ipinfo", "--limit", "1", "--skip", "1",
                               "--json"])
         if DATABASE not in ['postgres', 'sqlite']:
             # There is a warning in postgresql for unused argument.
-            self.assertTrue(not err)
+            self.assertFalse(err)
         self.assertEqual(res, 0)
         self.assertFalse(out1 == out2)
         # Test --sort
         res, out, err = RUN(["ivre", "ipinfo", "--json", "--sort", "port"])
         if DATABASE not in ['postgres', 'sqlite']:
             # There is a warning in postgresql for unused argument.
-            self.assertTrue(not err)
+            self.assertFalse(err)
         self.assertEqual(res, 0)
         port = 0
         for line in out.decode().splitlines():
@@ -2152,7 +2218,7 @@ purposes to feed Elasticsearch view.
         res, out, err = RUN(["ivre", "ipinfo", "--json", "--sort", "~port"])
         if DATABASE not in ['postgres', 'sqlite']:
             # There is a warning in postgresql for unused argument.
-            self.assertTrue(not err)
+            self.assertFalse(err)
         self.assertEqual(res, 0)
         port = 65536
         for line in out.decode().splitlines():
@@ -2210,7 +2276,7 @@ purposes to feed Elasticsearch view.
             res, out, err = RUN(["ivre", "ipinfo", "--count", "--asnum",
                                  str(asnum)])
             self.assertEqual(ret, 0)
-            self.assertTrue(not err)
+            self.assertFalse(err)
             self.check_value("passive_count_as%d" % asnum, int(out))
         for cname in ['US', 'FR', 'DE', 'KP', 'XX']:
             if DATABASE in ["sqlite", "tinydb"] and \
@@ -2229,7 +2295,7 @@ purposes to feed Elasticsearch view.
             res, out, err = RUN(["ivre", "ipinfo", "--count", "--country",
                                  cname])
             self.assertEqual(ret, 0)
-            self.assertTrue(not err)
+            self.assertFalse(err)
             self.check_value("passive_count_country_%s" % cname, int(out))
 
         ret, out, _ = RUN(["ivre", "ipinfo", "--short"])
@@ -2268,6 +2334,53 @@ purposes to feed Elasticsearch view.
         web_count += sum(1 for _ in udesc)
 
         self.assertEqual(web_count, count)
+
+        for rtype in ['A', 'AAAA']:
+            rec = next(iter(ivre.db.db.passive.get(
+                ivre.db.db.passive.searchdns(dnstype=rtype),
+                sort=[('addr', 1)]
+            )))
+            req = Request('http://%s:%d/cgi/passivedns/%s' % (
+                HTTPD_HOSTNAME,
+                HTTPD_PORT,
+                rec['addr']
+            ))
+            req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                         HTTPD_PORT))
+            udesc = urlopen(req)
+            self.assertEqual(udesc.getcode(), 200)
+            found = False
+            for line in udesc:
+                cur_rec = json.loads(line.decode("utf-8"))
+                self.assertEqual(rec['addr'], cur_rec['rdata'])
+                if cur_rec['rrtype'] == rtype and \
+                        cur_rec['rrname'] == rec['value']:
+                    found = True
+                    break
+            self.assertTrue(found)
+
+        rec = next(iter(ivre.db.db.passive.get(
+            ivre.db.db.passive.searchdns(dnstype='A'),
+            sort=[('addr', 1)]
+        )))
+        # Try to request subnet /24 (should include the initial IP addr)
+        req = Request('http://%s:%d/cgi/passivedns/%s/24' % (
+            HTTPD_HOSTNAME,
+            HTTPD_PORT,
+            rec['addr']
+        ))
+        req.add_header('Referer', 'http://%s:%d/' % (HTTPD_HOSTNAME,
+                                                     HTTPD_PORT))
+        udesc = urlopen(req)
+        self.assertEqual(udesc.getcode(), 200)
+        found = False
+        for line in udesc:
+            cur_rec = json.loads(line.decode("utf-8"))
+            self.assertEqual(rec['addr'], cur_rec['rdata'])
+            if cur_rec['rrtype'] == 'A' and cur_rec['rrname'] == rec['value']:
+                found = True
+                break
+        self.assertTrue(found)
 
         for tail in ["tail", "tailnew"]:
             ret, out, _ = RUN(["ivre", "ipinfo", "--%s" % tail, "1"])
@@ -2349,7 +2462,7 @@ purposes to feed Elasticsearch view.
         os.unlink(fdesc.name)
 
         self.assertEqual(res, 0)
-        self.assertTrue(not out)
+        self.assertFalse(out)
 
         if DATABASE == "tinydb":
             ivre.db.db.passive.invalidate_cache()
@@ -2369,7 +2482,7 @@ purposes to feed Elasticsearch view.
             res, out, err = RUN(["ivre", "ipinfo", "--count", "--dnstype",
                                 dnstype])
             self.assertEqual(res, 0)
-            self.assertTrue(not err)
+            self.assertFalse(err)
             self.check_value("passive_count_dnstype_%s" % dnstype, int(out))
 
         if DATABASE == "sqlite":
@@ -2561,32 +2674,32 @@ purposes to feed Elasticsearch view.
         res, out, err = RUN(["ivre", "flowcli", "--init"],
                             stdin=open(os.devnull))
         self.assertEqual(res, 0)
-        self.assertTrue(not out)
-        self.assertTrue(not err)
+        self.assertFalse(out)
+        self.assertFalse(err)
         res, out, err = RUN(["ivre", "flowcli", "--count"])
         self.assertEqual(res, 0)
         self.assertEqual(out, b"0 clients\n0 servers\n0 flows\n")
-        self.assertTrue(not err)
+        self.assertFalse(err)
         for pcapfname in self.pcap_files:
             # Only Python 3.2+
             # with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = tempfile.mkdtemp()
-            broprocess = subprocess.Popen(
-                ['bro', '-C', '-r', os.path.join(os.getcwd(), pcapfname),
-                 os.path.join(ivre.config.guess_prefix('bro'), 'ivre'),
+            zeekprocess = subprocess.Popen(
+                ['zeek', '-C', '-r', os.path.join(os.getcwd(), pcapfname),
+                 os.path.join(ivre.config.guess_prefix('zeek'), 'ivre'),
                  '-e',
                  'redef tcp_content_deliver_all_resp = T; '
                  'redef tcp_content_deliver_all_orig = T;'],
                 cwd=tmpdir)
-            broprocess.wait()
-            res, out, _ = RUN(['ivre', 'bro2db'] + [
+            zeekprocess.wait()
+            res, out, _ = RUN(['ivre', 'zeek2db'] + [
                 os.path.join(dirname, fname)
                 for dirname, _, fnames in os.walk(tmpdir)
                 for fname in fnames
                 if fname.endswith('.log')
             ])
             self.assertEqual(res, 0)
-            self.assertTrue(not out)
+            self.assertFalse(out)
             ivre.utils.cleandir(tmpdir)
         total = self.check_flow_count_value("flow_count", {}, [], None)
 
@@ -2690,8 +2803,6 @@ purposes to feed Elasticsearch view.
             ["--proto", "icmp"],
             command="flowcli")
 
-        # Time precision in mongo is millisecond, whereas it is microsecond in
-        # Neo4j. Thus, we can't have the same results.
         firstseen_date = self.get_timezone_fmt_date(
             "2015-09-18 14:15:19.830319")
         self.check_flow_count_value(
@@ -2707,7 +2818,7 @@ purposes to feed Elasticsearch view.
             ["--flow-filters", "lastseen = %s" % lastseen_date],
             {"edges": ["lastseen = %s" % lastseen_date]})
         self.check_flow_count_value(
-            "flow_count_gt_lastseen_%s" % DATABASE,
+            "flow_count_gt_lastseen",
             {"edges": ["lastseen > %s" % lastseen_date]},
             ["--flow-filters", "lastseen > %s" % lastseen_date],
             {"edges": ["lastseen > %s" % lastseen_date]})
@@ -2750,12 +2861,17 @@ purposes to feed Elasticsearch view.
             dport_443["flows"],
             tcp_dport_443["flows"] + udp_dport_443["flows"])
 
-        union = self.check_flow_count_value(
+        flt = 'proto = tcp OR proto = udp OR proto = icmp'
+        self.check_flow_count_value(
             "flow_count_tcp_udp_icmp",
-            {"edges": ['proto = tcp OR proto = udp OR proto = icmp']},
-            ["--flow-filters", "proto = tcp OR proto = udp OR proto = icmp"],
-            {"edges": ["proto = tcp OR proto = udp OR proto = icmp"]})
-        self.assertEqual(union, total)
+            {"edges": [flt]}, ["--flow-filters", flt], {"edges": [flt]},
+        )
+        # all protocols count == total count
+        flt = 'proto = tcp OR proto = udp OR proto = icmp OR proto = arp'
+        self.check_flow_count_value(
+            "flow_count",
+            {"edges": [flt]}, ["--flow-filters", flt], {"edges": [flt]},
+        )
 
         # Test operators
         sport = self.check_flow_count_value(
@@ -2815,15 +2931,13 @@ purposes to feed Elasticsearch view.
             sport["flows"],
             sport_lte_68["flows"] + sport_gt_68["flows"])
 
-        # MongoDB stores a unlimited number of source ports,
-        # whereas neo4j stores only 5
         self.check_flow_count_value(
-            "flow_count_len_sports_%s" % DATABASE,
+            "flow_count_len_sports",
             {"edges": ['LEN sports = 5']},
             ["--flow-filters", "LEN sports = 5"],
             {"edges": ["LEN sports = 5"]})
         self.check_flow_count_value(
-            "flow_count_all_sports_%s" % DATABASE,
+            "flow_count_all_sports",
             {"edges": ['ALL sports > 50000']},
             ["--flow-filters", "ALL sports > 50000"],
             {"edges": ["ALL sports > 50000"]})
@@ -2832,7 +2946,7 @@ purposes to feed Elasticsearch view.
         # Notice: this depends on the local timezone!
         res, out, err = RUN(['ivre', 'flowcli', '--flow-daily'])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         lines = out.decode().split('\n')[:-1]
         for i, line in enumerate(lines):
             data = line.split('|')
@@ -2949,7 +3063,7 @@ purposes to feed Elasticsearch view.
             # Test precision
             res, out, err = RUN(['ivre', 'flowcli', '--precision'])
             self.assertEqual(res, 0)
-            self.assertTrue(not err)
+            self.assertFalse(err)
             numbers = out.decode().split('\n')[:-1]
             self.assertEqual(len(numbers), 1)
             self.assertEqual(int(numbers[0]), ivre.config.FLOW_TIME_PRECISION)
@@ -3000,18 +3114,18 @@ purposes to feed Elasticsearch view.
         res, out, err = RUN(["ivre", "flowcli", "--init"],
                             stdin=open(os.devnull))
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
-        res, out, err = RUN(['ivre', 'bro2db', os.path.join(os.getcwd(),
+        self.assertFalse(err)
+        res, out, err = RUN(['ivre', 'zeek2db', os.path.join(os.getcwd(),
                              "samples", "mongo_conn.log")])
         self.assertEqual(res, 0)
-        self.assertTrue(not out)
+        self.assertFalse(out)
         self.check_flow_count_value("flow_count_cleanup", {}, [], None)
 
         # Test netflow capture insertion
         res, out, err = RUN(["ivre", "flowcli", "--init"],
                             stdin=open(os.devnull))
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
 
         res, out, err = RUN(['ivre', 'flow2db',
                              os.path.join(os.getcwd(), "samples", "nfcapd")])
@@ -3080,15 +3194,8 @@ purposes to feed Elasticsearch view.
 
         res, out, _ = RUN(["ivre", "ipdata", "8.8.8.8"])
         self.assertEqual(res, 0)
-        # The order may differ, depending on the backend.  We need to
-        # replace float representations because it differs between
-        # Python 2.6 and other supported Python version; see
-        # <https://docs.python.org/2/whatsnew/2.7.html#python-3-1-features>.
-        out = sorted(
-            b'    coordinates (37.751, -97.822)' if
-            x == b'    coordinates (37.750999999999998, -97.822000000000003)'
-            else x for x in out.splitlines()
-        )
+        # The order may differ, depending on the backend.
+        out = sorted(out.splitlines())
         self.assertEqual(out, sorted(b'''8.8.8.8
     as_num 15169
     as_name Google LLC
@@ -3112,15 +3219,15 @@ purposes to feed Elasticsearch view.
         res, out, _ = RUN(["ivre", "runscans", "--output", "Count",
                            "--routable"])
         self.assertEqual(res, 0)
-        self.assertEqual(out, b'We have 2848655972 routable IPs.\n')
+        self.assertEqual(out, b'Target has 2848655972 IP addresses\n')
         res, out, _ = RUN(["ivre", "runscans", "--output", "Count", "--asnum",
                            "15169"])
         self.assertEqual(res, 0)
-        self.assertEqual(out, b'AS15169 has 4521723 IPs.\n')
+        self.assertEqual(out, b'Target has 4521723 IP addresses\n')
         res, out, _ = RUN(["ivre", "runscans", "--output", "Count",
                            "--country", "US"])
         self.assertEqual(res, 0)
-        self.assertEqual(out, b'US has 1581733971 IPs.\n')
+        self.assertEqual(out, b'Target has 1581733971 IP addresses\n')
         res, out, _ = RUN(["ivre", "runscans", "--output", "List", "--country",
                            "PN"])
         self.assertEqual(res, 0)
@@ -3191,6 +3298,30 @@ purposes to feed Elasticsearch view.
                 json.loads(udesc.read().decode()),
             )
 
+        # targets manipulation
+        targ1 = ivre.target.TargetCountry('PN')
+        targ2 = ivre.target.TargetCountry('BV')
+        self.assertItemsEqual(set(targ1).union(targ2), set(targ1 + targ2))
+        count_t1_t2 = len(targ1 + targ2)
+
+        res, out1, err = RUN(["ivre", "runscans", "--output", "Count",
+                              "--country", "UK"])
+        self.assertEqual(res, 0)
+        self.assertFalse(err)
+        res, out2, err = RUN(["ivre", "runscans", "--output", "Count",
+                              "--country", "GB"])
+        self.assertEqual(res, 0)
+        self.assertFalse(err)
+        self.assertEqual(out1, out2)
+        res, out, err = RUN(["ivre", "runscans", "--output", "Count",
+                             "--country", "PN,BV"])
+        self.assertEqual(res, 0)
+        self.assertFalse(err)
+        self.assertEqual(
+            out,
+            ("Target has %d IP addresses\n" % count_t1_t2).encode(),
+        )
+
     def test_utils(self):
         """Functions that have not yet been tested"""
 
@@ -3200,14 +3331,14 @@ purposes to feed Elasticsearch view.
         # Version / help
         res, out1, err = RUN(["ivre"])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         res, out2, err = RUN(["ivre", "help"])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(out1, out2)
         res, _, err = RUN(["ivre", "version"])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         res, _, _ = RUN(["ivre", "inexistent"])
         self.assertTrue(res)
 
@@ -3288,7 +3419,7 @@ purposes to feed Elasticsearch view.
         self.assertEqual(match['service_product'], 'Microsoft Exchange smtpd')
         self.assertEqual(match['service_version'], '5.5.2653.13')
 
-        # Nmap (and Bro) encoding & decoding
+        # Nmap (and Zeek) encoding & decoding
         # >>> from random import randint
         # >>> bytes(randint(0, 255) for _ in range(1000))
         raw_data = b'\xc6\x97\x05\xc8\x16\x96\xaei\xe9\xdd\xe8"\x07\x16\x15\x8c\xf5%x\xb0\x00\xb4\xbcv\xb8A\x19\xefj+RbgH}U\xec\xb4\x1bZ\x08\xd4\xfe\xca\x95z\xa0\x0cB\xabWM\xf1\xfd\x95\xb7)\xbb\xe9\xa7\x8a\x08]\x8a\xcab\xb3\x1eI\xc0Q0\xec\xd0\xd4\xd4bt\xf7\xbb1\xc5\x9c\x85\xf8\x87\x8b\xb2\x87\xed\x82R\xf9}+\xfc\xa4\xf2?\xa5}\x17k\xa6\xb6t\xab\x91\x91\x83?\xb4\x01L\x1fO\xff}\x98j\xa5\x9a\t,\xf3\x8b\x1e\xf4\xd3~\x83\x87\x0b\x95\\\xa9\xaa\xfbi5\xfb\xaau\xc6y\xff\xac\xcb\'\xa5\xf4y\x8f\xab\xf2\x04Z\xf1\xd7\x08\x17\xa8\xa5\xe4\x04\xa5R0\xdb\xa3\xe6\xc0\x88\x9a\xee\x93\x8c\x8a\x8b\xa3\x03\xb6\xdf\xbbHp\x1f\x1d{\x92\xb2\xd7B\xc4\x13\xddD\xb29\xbd\x0f\xd8\xed\x94q\xda\x00\x067\xd8T\xb3I\xd3\x88/wE\xd4C\xec!\xf6 <H\xaa\xea\xc1;\x90\x87)\xc5\xb6\xd6\n\x81r\x16\xa1/\xd0Q<\xa4jT\x0f\xe4\xad\x14>0\xf1\xb7\xec\x08\x7f>"\x96P\xd2;\xc4:\xed\xc0\xcb\x85M\x04&{|k\xd0\x06Yc_\x12S\xb0>\xe0=:\xca1\xca\n\xcb.\xf4\xe2\xb1e\x0e\x16\xd6\x8c\xbc!\xbcWd\x19\x0b\xd7\xa0\xed\x1d>$%\xf7\xfb\xc2(\xef\x13\x82\xcc\xa5\xecc\x1fy_\x9f93\xbcPv\xd7\x9b\xbb\x0b]\x9a\xc7\xbd&5\xb2\x85\x95\xfb\xf2j\x11f\xd8\xdb\x03\xc0\xb1\xda\x08aF\x80\xd8\x18\x7f\xf3\x86N\x91\xa6\xd4i\x83\xd4*$_t\x19\xb3\xa2\x187w2 \x0c#\xe5\xca\x03\xb3@H\xb7\xfb,a\xb8\x02\xe4;/\xc11\xb7\xd8\xdd\x9b\xcc\xdcg\xb4\x9f\x81\x10,\x0e\x0c\'_m\xf8$\xa10\xc4\xe9\xc5G_\x14\x10\xf5& \xcf\xa8\x10:\xee\x1aGL\x966\xd7\x1d?\xb0:\xee\x11\x89\xb9\xeb\x8d\xf7\x02\x00\xdb\xd9/\x8a\x01!\xa5wRc?\xfd\x87\x11E\xa9\x8f\x9ed\x0f.\xffM\xd1\xb4\xe9\x19\xb0\xb0"\xac\x84\xff5D\xa9\x12O\xcc1G#\xb5\x16\xba%{:\xde\xf6\t"\xe7\xed\xa0*\xa3\x89\xabl\x08p\x1d\xc1\xae\x14e)\xf3=\x16\x80\xa8\x1b\xe3OSD&V\x16\xf3*\x8416\xdd6\xe6\xbf,R$\x93s>\x87\xbe\x94\x1c\x10\\o,\xc2\x18ig\xa2\xf7\xc9\x9d|\x8c\xc6\x94\\\xee\xb0\'\x01\x1c\x94\xf8\xea\xda\x91\xf1 \x8cP\x84=\xa0\x1a\x87\xba\xa8\x9c\xd6\xf7\n\'\x99\xb9\xd5L\xd2u\x7f\x13\xf3^_T\xc3\x806\x94\xbe\x94\xee\x0cJ`\xba\xf1\n*\xc2\xc7?[\xa7\xdd\xcbX\x08\xafTsU\x81\xa5r\x86Q\x1b8\xcf\xc8\xab\xf1\x1e\xee,i\x15:*\xb4\x84\x01\xc0\x8f\xb3\xdcER%\xe2\x16\x9f\x80z:\xcdZ\xae$\x04\xbfa\xae+\x84U\xb6\x06 \xfe\xd5Y\xf7\xd9\xbftQ0\xbd\xf3\xf5O\x98\xad\x90n\x97\xbd\x81\x1f-\xe5\x1d\x14R\x94\x9cH\x8bf\x80*!E\x933\x88_\xf2]3\xa7g\x9d\\(S\xdc\xd7\x16OXZ\xf7\xc8\x98jU\xbc]\x92\xf3\xc2S\x0c>\';i.\xab\n\x90\xb33\x80\x17k\xfb9\x14\x1a\xd5\x89##?6Y^|{c\x86\x1cF\xc1\x9c\xf1\xcb^\x92\xed\x92$\x15\x81e:\xfc\x13\x1d\x07\xd9\xe9\xd5\x1f(\xef\xc1K\xeem\xa8f7O\x89\xa8\x08\xbd\x12\xeb\xa8\xa6\x9d\xba\xbe\x06\x820x\x18x\xe8A-<p\xd2-\x9c\x00\xde\xbdE\x1bn\x81\x93\x1c\xca\xfc\xe4($\x13\x147\x9d,(t\xffiT\xa6ZU\xc2\xd9<\xba\xa1F\x11\x19N\xb8\xeeA-jC\xdf\xff\x94k\xb5G\x8c\x9e\x19\xff\xf6\x8bg\xb4\x19!\xe9\\\xccB\xd0Y\x08\xfa\'\xc2\x0eYMW\x9fdM0\xb0A\xb5R\xd3t\x8b\t\xb5\xcew,f\x9c\xed\\t\xbc\xf11\xa9\xd3\xef\xdd\xf6\xcf\x96\xe1$\x9a@\xb3v\x05\xc5\xc3\x9e%\xb2\xf8\xe8\xdcd81u\xa8Y\x07\xb15\xe9\xa7\xae\xee\xa9GD\x9e\x7fP\xcf\xd8ca%\xb16\xb6\xc4FP\xed\x8e\x83\x05\x15F'  # noqa: E501
@@ -3449,8 +3580,8 @@ purposes to feed Elasticsearch view.
         )
         self.assertEqual(ivre.utils.num2readable(1049000.0), '1.049M')
 
-        # Bro logs
-        basepath = os.getenv('BRO_SAMPLES')
+        # Zeek logs
+        basepath = os.getenv('ZEEK_SAMPLES')
         badchars = re.compile('[%s]' % ''.join(
             re.escape(char) for char in [os.path.sep, '-', '.']
         ))
@@ -3460,12 +3591,12 @@ purposes to feed Elasticsearch view.
                     if not fname.endswith('.log'):
                         continue
                     fname = os.path.join(dirname, fname)
-                    brofd = ivre.parser.bro.BroFile(fname)
+                    zeekfd = ivre.parser.zeek.ZeekFile(fname)
                     i = 0
-                    for i, record in enumerate(brofd):
+                    for i, record in enumerate(zeekfd):
                         json.dumps(record, default=ivre.utils.serialize)
                     self.check_value(
-                        'utils_bro_%s_count' % badchars.sub(
+                        'utils_zeek_%s_count' % badchars.sub(
                             '_',
                             fname[len(basepath):-4].lstrip('/'),
                         ),
@@ -3495,6 +3626,7 @@ purposes to feed Elasticsearch view.
         self.assertTrue('FR' in europe)
         self.assertTrue('DE' in europe)
         self.assertFalse('US' in europe)
+        self.assertFalse('GB' in europe)
         self.assertEqual(ivre.utils.country_unalias('UK'),
                          ivre.utils.country_unalias('GB'))
         ukfr = ivre.utils.country_unalias(['FR', 'UK'])
@@ -3632,6 +3764,29 @@ purposes to feed Elasticsearch view.
                 expr.sub(result, result),
                 result
             )
+
+        # DNS audit domain
+        with tempfile.NamedTemporaryFile(delete=False) as fdesc:
+            res = RUN(["ivre", "auditdom", "ivre.rocks", "zonetransfer.me"],
+                      stdout=fdesc)[0]
+            self.assertEqual(res, 0)
+        res, out, err = RUN(["ivre", "scan2db", "--test", fdesc.name])
+        os.unlink(fdesc.name)
+        self.assertEqual(res, 0)
+        out = out.decode().splitlines()
+        self.assertEqual(len(out), 26)
+        found = False
+        for line in out:
+            rec = json.loads(line)
+            for port in rec.get('ports', []):
+                self.assertEqual(len(port['scripts']), 1)
+                for script in port['scripts']:
+                    self.assertEqual(script['id'], 'dns-zone-transfer')
+                    self.assertEqual(len(script['dns-zone-transfer']), 1)
+                    self.assertEqual(script['dns-zone-transfer'][0]['domain'],
+                                     'zonetransfer.me')
+                    found = True
+        self.assertTrue(found)
 
     def test_scans(self):
         "Run scans, with and without agents"
@@ -3855,11 +4010,9 @@ purposes to feed Elasticsearch view.
         self.assertTrue(os.path.exists(data_files[0]))
         self.assertEqual(len(up_files), 1)
         self.assertTrue(os.path.exists(up_files[0]))
-        # TarFile object does not implement __exit__ on Python 2.6,
-        # cannot use `with`
-        data_archive = tarfile.open(data_files[0])
-        data_archive.extractall()
-        data_archive.close()
+        with tarfile.open(data_files[0]) as data_archive:
+            data_archive = tarfile.open(data_files[0])
+            data_archive.extractall()
         self.assertTrue(os.path.exists('screenshot-%s-80.jpg' % ipaddr))
         res, out, _ = RUN(["ivre", "scan2db", "--test"] + up_files)
         self.assertEqual(res, 0)
@@ -3869,15 +4022,18 @@ purposes to feed Elasticsearch view.
                 return json.loads(data.decode())
             except ValueError:
                 return deflt
-        screenshots_count = sum(bool(port.get('screendata'))
-                                for line in out.splitlines()
-                                for host in _json_loads(line, [])
-                                for port in host.get('ports', []))
+        screenshots_count = sum(
+            bool(port.get('screendata'))
+            for line in out.splitlines()
+            for port in _json_loads(line, {}).get('ports', [])
+        )
         self.assertEqual(screenshots_count, 1)
-        screenwords = set(word for line in out.splitlines()
-                          for host in _json_loads(line, [])
-                          for port in host.get('ports', [])
-                          for word in port.get('screenwords', []))
+        screenwords = set(
+            word
+            for line in out.splitlines()
+            for port in _json_loads(line, {}).get('ports', [])
+            for word in port.get('screenwords', [])
+        )
         self.assertTrue('IVRE' in screenwords)
         shutil.rmtree('output')
 
@@ -4018,24 +4174,24 @@ purposes to feed Elasticsearch view.
                                                  [], None)
         ret, out, err = RUN(["ivre", "view"])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
 
         print('Outputs')
         # JSON
         ret, out, err = RUN(["ivre", "view", "--json"])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(len(out.splitlines()), view_count)
         # GNMAP
         ret, out, err = RUN(["ivre", "view", "--gnmap"])
         self.assertEqual(ret, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         count = sum(1 for line in out.splitlines() if b'Status: Up' in line)
         self.check_value("view_gnmap_up_count", count)
         # SHORT
         res, out, err = RUN(['ivre', 'view', '--short'])
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.assertEqual(len(out.splitlines()), view_count)
 
         res, out, _ = RUN(["ivre", "view", "--count", "--category", "PASSIVE"])
@@ -4146,11 +4302,11 @@ purposes to feed Elasticsearch view.
                     found = False
                     for port in host['ports']:
                         for script in port.get('scripts', []):
-                            if script['id'] == 'ssl-cert' and script.get(
-                                    'ssl-cert', {}
-                            ).get(hashtype) == val:
-                                found = True
-                                break
+                            if script['id'] == 'ssl-cert':
+                                for cert in script.get('ssl-cert', []):
+                                    if cert.get(hashtype) == val:
+                                        found = True
+                                        break
                         if found:
                             break
                     self.assertTrue(found)
@@ -4176,6 +4332,66 @@ purposes to feed Elasticsearch view.
             ivre.db.db.view.searchversion(ivre.xmlnmap.SCHEMA_VERSION),
             database=ivre.db.db.view,
         )
+
+        # Check .searchproduct()
+        for service, product in [('ssh', 'Cisco SSH'),
+                                 ('http', 'Apache httpd'),
+                                 ('imap', 'Microsoft Exchange imapd'),
+                                 ('imap', False)]:
+            flt = ivre.db.db.view.searchproduct(product=product,
+                                                service=service)
+            count = ivre.db.db.view.count(flt)
+            self.check_value(
+                "view_count_%s_%s" % (
+                    service, (product or "UNKNOWN").replace(' ', ''),
+                ),
+                count,
+            )
+            for res in ivre.db.db.view.get(flt):
+                found = False
+                for port in res.get('ports', []):
+                    if port.get('service_name') == service:
+                        if product:
+                            if port.get('service_product') == product:
+                                found = True
+                                break
+                        elif 'service_product' not in port:
+                            found = True
+                            break
+                self.assertTrue(found)
+
+        for service, product, version in [
+                ('ssh', 'Cisco SSH', "1.25"),
+                ('ssh', 'OpenSSH', '3.1p1'),
+                ('ssh', 'OpenSSH', False),
+        ]:
+            flt = ivre.db.db.view.searchproduct(product=product,
+                                                service=service,
+                                                version=version)
+            count = ivre.db.db.view.count(flt)
+            self.check_value(
+                "view_count_%s_%s_%s" % (
+                    service,
+                    product.replace(' ', ''),
+                    (version or "UNKNOWN").replace('.', '_'),
+                ),
+                count,
+            )
+            for res in ivre.db.db.view.get(flt):
+                found = False
+                for port in res.get('ports'):
+                    if (
+                            port.get('service_name') == service and
+                            port.get('service_product') == product
+                    ):
+                        if version:
+                            if port.get('service_version') == version:
+                                found = True
+                                break
+                        elif 'service_version' not in port:
+                            found = True
+                            break
+                self.assertTrue(found)
 
         # Check script search filter
         count = self.check_view_count_value(
@@ -4204,7 +4420,7 @@ purposes to feed Elasticsearch view.
         print('Web /view URLs')
         # Check Web /view
         addr = next(iter(ivre.db.db.view.get(
-            ivre.db.db.view.flt_empty, fields=['addr']
+            ivre.db.db.view.searchipv4(), fields=['addr']
         )))['addr']
         addr_i = ivre.utils.force_ip2int(addr)
         addr = ivre.utils.force_int2ip(addr)
@@ -4542,7 +4758,7 @@ purposes to feed Elasticsearch view.
 
         res, out, err = RUN(["ivre", "view", "--count"], env=newenv)
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         self.check_value("view_count_total", int(out))
 
         addr = next(iter(ivre.db.db.view.get(
@@ -4550,7 +4766,7 @@ purposes to feed Elasticsearch view.
         )))['addr']
         res, out, err = RUN(["ivre", "view", "--host", addr], env=newenv)
         self.assertEqual(res, 0)
-        self.assertTrue(not err)
+        self.assertFalse(err)
         found = False
         for line in out.splitlines():
             if line.startswith(b'Host '):
@@ -4560,6 +4776,34 @@ purposes to feed Elasticsearch view.
 
         os.unlink(fdesc.name)
         # END Using the HTTP server as a database
+
+    def test_55_view_delete(self):
+        # Remove
+        addr = next(iter(ivre.db.db.view.get(
+            ivre.db.db.view.flt_empty,
+            sort=[('addr', -1)])
+        ))['addr']
+        for result in ivre.db.db.view.get(
+            ivre.db.db.view.searchhost(addr)
+        ):
+            ivre.db.db.view.remove(result)
+        if DATABASE == 'elastic':
+            time.sleep(ELASTIC_INSERT_TEMPO)
+        count = ivre.db.db.view.count(
+            ivre.db.db.view.searchhost(addr)
+        )
+        self.assertEqual(count, 0)
+        addr = next(iter(ivre.db.db.view.get(
+            ivre.db.db.view.flt_empty,
+            sort=[('addr', -1)])
+        ))['addr']
+        ivre.db.db.view.remove_many(ivre.db.db.view.searchhost(addr))
+        if DATABASE == 'elastic':
+            time.sleep(ELASTIC_INSERT_TEMPO)
+        count = ivre.db.db.view.count(
+            ivre.db.db.view.searchhost(addr)
+        )
+        self.assertEqual(count, 0)
 
     def test_conf(self):
         # Ensure env var IVRE_CONF is taken into account
@@ -4586,65 +4830,33 @@ purposes to feed Elasticsearch view.
 
 
 TESTS = set(["10_data", "30_nmap", "40_passive", "50_view", "53_nmap_delete",
-             "54_passive_delete", "60_flow", "90_cleanup", "conf", "scans",
-             "utils"])
+             "54_passive_delete", "55_view_delete", "60_flow", "90_cleanup",
+             "conf", "scans", "utils"])
 
 
 DATABASES = {
     # **excluded** tests
     "mongo": ["utils"],
     "postgres": ["60_flow", "scans", "utils"],
-    "sqlite": ["30_nmap", "53_nmap_delete", "50_view", "60_flow", "scans",
-               "utils"],
-    "neo4j": ["30_nmap", "40_passive", "50_view", "53_nmap_delete",
-              "54_passive_delete", "90_cleanup", "scans", "utils"],
+    "sqlite": ["30_nmap", "50_view", "53_nmap_delete", "55_view_delete",
+               "60_flow", "scans", "utils"],
     "elastic": ["30_nmap", "40_passive", "53_nmap_delete", "54_passive_delete",
                 "60_flow", "90_cleanup", "scans", "utils"],
     "maxmind": ["30_nmap", "40_passive", "50_view", "53_nmap_delete",
-                "54_passive_delete", "60_flow", "90_cleanup", "scans"],
+                "54_passive_delete", "55_view_delete", "60_flow", "90_cleanup",
+                "scans"],
     "tinydb": ["utils"],
 }
 
 
 def parse_args():
     global SAMPLES, USE_COVERAGE
-    try:
-        import argparse
-        parser = argparse.ArgumentParser(
-            description='Run IVRE tests',
-        )
-        use_argparse = True
-    except ImportError:
-        import optparse
-        parser = optparse.OptionParser(
-            description='Run IVRE tests',
-        )
-        parser.parse_args_orig = parser.parse_args
-
-        def my_parse_args():
-            res = parser.parse_args_orig()
-            try:
-                test = next(test for test in res[1] if test not in TESTS)
-            except StopIteration:
-                pass
-            else:
-                raise optparse.OptionError(
-                    "invalid choice: %r (choose from %s)" % (
-                        test,
-                        ", ".join(repr(val) for val in sorted(TESTS)),
-                    ),
-                    "tests",
-                )
-            res[0].ensure_value('tests', res[1])
-            return res[0]
-        parser.parse_args = my_parse_args
-        parser.add_argument = parser.add_option
-        use_argparse = False
+    import argparse
+    parser = argparse.ArgumentParser(description='Run IVRE tests')
     parser.add_argument('--samples', metavar='DIR',
                         default="./samples/")
     parser.add_argument('--coverage', action="store_true")
-    if use_argparse:
-        parser.add_argument('tests', nargs='*', choices=list(TESTS) + [[]])
+    parser.add_argument('tests', nargs='*', choices=list(TESTS) + [[]])
     args = parser.parse_args()
     SAMPLES = args.samples
     USE_COVERAGE = args.coverage
@@ -4694,11 +4906,6 @@ if __name__ == '__main__':
         IvreTests.assertItemsEqual = IvreTests.assertCountEqual
     except AttributeError:
         pass
-    try:
-        IvreTests.assertIsNone
-    except AttributeError:
-        # Python 2.6
-        IvreTests.assertIsNone = lambda self, obj: self.assertTrue(obj is None)
     result = unittest.TextTestRunner(verbosity=2).run(
         unittest.TestLoader().loadTestsFromTestCase(IvreTests),
     )

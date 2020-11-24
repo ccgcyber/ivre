@@ -148,6 +148,11 @@ var GraphTopValues = (function(_super) {
 			    return 'setparam(FILTER, "open", "' + x.map(function(x) {return x.join('/');}).join(',') + '", true, true); setparam(FILTER, "countports", "' + x.length + '", true);';
 		    };
 	    }
+	    else if(field === "net" || field.substr(0, 4) === "net:") {
+		preparefilter = function(x) {
+		    return 'setparam(FILTER, "' + x + '")';
+		};
+	    }
 	    else if(['cert.issuer', 'cert.subject'].indexOf(field) !== -1)
 		prepareoutput = function(x) {
 		    var attributes = {
@@ -299,12 +304,12 @@ var GraphTopValues = (function(_super) {
 		};
 		if(field[7] === ':') {
 		    preparefilter = function(x) {
-			return 'setparam(FILTER, "service", "' + x + ':' + field.substr(8) + '");';
+			return 'setparam(FILTER, "service", "' + (x || "-") + ':' + field.substr(8) + '");';
 		    };
 		}
 		else {
 		    preparefilter = function(x) {
-			return 'setparam(FILTER, "service", "' + x + '");';
+			return 'setparam(FILTER, "service", "' + (x || "-") + '");';
 		    };
 		}
 	    }
@@ -317,12 +322,17 @@ var GraphTopValues = (function(_super) {
 		};
 		if(field[7] === ':' && field.substr(8) % 1 === 0) {
 		    preparefilter = function(x) {
-			return 'setparam(FILTER, "product", "' + x[0] + ':' + x[1] + field.substr(7) + '");';
+			return (
+			    'setparam(FILTER, "product", "' + (x[0] || "-") +
+				':' + (x[1] || "-") + field.substr(7) + '");'
+			);
 		    };
 		}
 		else {
 		    preparefilter = function(x) {
-			return 'setparam(FILTER, "product", "' + x[0] + ':' + x[1] + '");';
+			return (
+			    'setparam(FILTER, "product", "' + (x[0] || "-") +
+				':' + (x[1] || "-") + '");');
 		    };
 		}
 	    }
@@ -337,12 +347,20 @@ var GraphTopValues = (function(_super) {
 		};
 		if(field[7] === ':' && field.substr(8) % 1 === 0) {
 		    preparefilter = function(x) {
-			return 'setparam(FILTER, "version", "' + x[0] + ':' + x[1] + ':' + x[2] + field.substr(7) + '");';
+			return (
+			    'setparam(FILTER, "version", "' + (x[0] || "-") +
+				':' + (x[1] || "-") + ':' + (x[2] || "-") +
+				field.substr(7) + '");'
+			);
 		    };
 		}
 		else {
 		    preparefilter = function(x) {
-			return 'setparam(FILTER, "version", "' + x[0] + ':' + x[1] + ':' + x[2] + '");';
+			return (
+			    'setparam(FILTER, "version", "' + (x[0] || "-") +
+				':' + (x[1] || "-") + ':' + (x[2] || "-") +
+				'");'
+			);
 		    };
 		}
 	    }

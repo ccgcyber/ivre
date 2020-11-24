@@ -17,123 +17,43 @@
 # You should have received a copy of the GNU General Public License
 # along with IVRE. If not, see <http://www.gnu.org/licenses/>.
 
-"""
-This module is part of IVRE.
-Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
-
-This sub-module contains the parser for nmap's XML output files.
+"""This sub-module contains the parser for nmap's XML output files.
 
 """
 
 
 import datetime
+import hashlib
+import json
 import os
 import re
 import struct
 import sys
 from textwrap import wrap
+try:
+    from urllib.parse import urlparse
+except ImportError:
+    from urlparse import urlparse
 from xml.sax.handler import ContentHandler, EntityResolver
 
 
-from builtins import int, range
+from builtins import int
 from future.utils import viewitems, viewvalues
 from past.builtins import basestring
 
 
+from ivre.active.cpe import cpe2dict
+from ivre.active.data import ALIASES_TABLE_ELEMS, \
+    cleanup_synack_honeypot_host, create_ssl_output, handle_http_headers
+from ivre.analyzer import dicom, ike
 from ivre import utils
-from ivre.analyzer import ike
 
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 18
 
 # Scripts that mix elem/table tags with and without key attributes,
 # which is not supported for now
 IGNORE_TABLE_ELEMS = set(['xmpp-info', 'sslv2', 'sslv2-drown'])
-
-ALIASES_TABLE_ELEMS = {
-    # ls unified output (ls NSE module + ftp-anon)
-    #   grep -lF 'ls.new_vol' * | sed 's#^#    "#;s#.nse$#": "ls",#'
-    "afp-ls": "ls",
-    "http-ls": "ls",
-    "nfs-ls": "ls",
-    "smb-ls": "ls",
-    #   + ftp-anon
-    "ftp-anon": "ls",
-    # vulns unified output (vulns NSE module)
-    #   grep -l -F vulns.Report * | sed 's#^#    "#;s#.nse$#": "vulns",#'
-    "afp-path-vuln": "vulns",
-    "clamav-exec": "vulns",
-    "distcc-cve2004-2687": "vulns",
-    "ftp-libopie": "vulns",
-    "ftp-vsftpd-backdoor": "vulns",
-    "ftp-vuln-cve2010-4221": "vulns",
-    "http-avaya-ipoffice-users": "vulns",
-    "http-cross-domain-policy": "vulns",
-    "http-dlink-backdoor": "vulns",
-    "http-frontpage-login": "vulns",
-    "http-huawei-hg5xx-vuln": "vulns",
-    "http-iis-short-name-brute": "vulns",
-    "http-method-tamper": "vulns",
-    "http-phpmyadmin-dir-traversal": "vulns",
-    "http-phpself-xss": "vulns",
-    "http-sap-netweaver-leak": "vulns",
-    "http-shellshock": "vulns",
-    "http-slowloris-check": "vulns",
-    "http-tplink-dir-traversal": "vulns",
-    "http-vuln-cve2006-3392": "vulns",
-    "http-vuln-cve2009-3960": "vulns",
-    "http-vuln-cve2010-2861": "vulns",
-    "http-vuln-cve2011-3192": "vulns",
-    "http-vuln-cve2011-3368": "vulns",
-    "http-vuln-cve2012-1823": "vulns",
-    "http-vuln-cve2013-0156": "vulns",
-    "http-vuln-cve2013-6786": "vulns",
-    "http-vuln-cve2013-7091": "vulns",
-    "http-vuln-cve2014-2126": "vulns",
-    "http-vuln-cve2014-2127": "vulns",
-    "http-vuln-cve2014-2128": "vulns",
-    "http-vuln-cve2014-2129": "vulns",
-    "http-vuln-cve2014-3704": "vulns",
-    "http-vuln-cve2014-8877": "vulns",
-    "http-vuln-cve2015-1427": "vulns",
-    "http-vuln-cve2015-1635": "vulns",
-    "http-vuln-cve2017-1001000": "vulns",
-    "http-vuln-cve2017-5638": "vulns",
-    "http-vuln-cve2017-5689": "vulns",
-    "http-vuln-cve2017-8917": "vulns",
-    "http-vuln-misfortune-cookie": "vulns",
-    "http-vuln-wnr1000-creds": "vulns",
-    "ipmi-cipher-zero": "vulns",
-    "mysql-vuln-cve2012-2122": "vulns",
-    "qconn-exec": "vulns",
-    "rdp-vuln-ms12-020": "vulns",
-    "realvnc-auth-bypass": "vulns",
-    "rmi-vuln-classloader": "vulns",
-    "rsa-vuln-roca": "vulns",
-    "samba-vuln-cve-2012-1182": "vulns",
-    "smb2-vuln-uptime": "vulns",
-    "smb-double-pulsar-backdoor": "vulns",
-    "smb-vuln-conficker": "vulns",
-    "smb-vuln-cve2009-3103": "vulns",
-    "smb-vuln-cve-2017-7494": "vulns",
-    "smb-vuln-ms06-025": "vulns",
-    "smb-vuln-ms07-029": "vulns",
-    "smb-vuln-ms08-067": "vulns",
-    "smb-vuln-ms10-054": "vulns",
-    "smb-vuln-ms10-061": "vulns",
-    "smb-vuln-ms17-010": "vulns",
-    "smb-vuln-regsvc-dos": "vulns",
-    "smb-vuln-webexec": "vulns",
-    "smtp-vuln-cve2011-1720": "vulns",
-    "smtp-vuln-cve2011-1764": "vulns",
-    "ssl-ccs-injection": "vulns",
-    "ssl-dh-params": "vulns",
-    "ssl-heartbleed": "vulns",
-    "ssl-poodle": "vulns",
-    "sslv2-drown": "vulns",
-    "supermicro-ipmi-conf": "vulns",
-    "tls-ticketbleed": "vulns",
-}
 
 SCREENSHOT_PATTERN = re.compile('^ *Saved to (.*)$', re.MULTILINE)
 RTSP_SCREENSHOT_PATTERN = re.compile('^ *Saved [^ ]* to (.*)$', re.MULTILINE)
@@ -793,52 +713,11 @@ New in SCHEMA_VERSION == 15.
     return result
 
 
-def change_ssl_cert(table):
-    """Fix modulus and exponent value in "ssl-cert" Nmap script. A bug
-exists in some Nmap versions that reports "BIGNUM: 0x<memory address>"
-instead of the value for fields `.modulus` and `.exponent` of
-`.pubkey`.
-
-In newer versions, the output has been fixed, **but** the exponent is
-written as a decimal number and the modulus as an hexadecimal number
-(see comments there: <https://github.com/nmap/nmap/commit/0f3a8a7>.
-
-    """
-    if (
-            not isinstance(table, dict) or 'pubkey' not in table or
-            'pem' not in table
-    ):
-        return table
-    pubkey = table['pubkey']
-    fixit = False
-    for key in ["modulus", "exponent"]:
-        if (
-                isinstance(pubkey.get(key), str) and
-                pubkey[key].startswith('BIGNUM: ')
-        ):
-            fixit = True
-            break
-    if not fixit:
-        if isinstance(pubkey.get("modulus"), str):
-            try:
-                pubkey["modulus"] = str(int(pubkey["modulus"], 16))
-            except ValueError:
-                utils.LOGGER.warning('Cannot convert modulus to decimal [%r]',
-                                     pubkey["modulus"])
-        return table
-    data = ''.join(table['pem'].splitlines()[1:-1]).encode()
-    try:
-        newinfo = create_ssl_cert(data)[1]
-    except Exception:
-        utils.LOGGER.warning('Cannot parse certificate %r', data,
-                             exc_info=True)
-        return table
-    if 'pubkey' not in newinfo:
-        return table
-    newpubkey = newinfo['pubkey']
-    for key in ["modulus", "exponent"]:
-        if key in newpubkey:
-            pubkey[key] = newpubkey[key]
+def change_http_server_header(table):
+    if isinstance(table, dict):
+        if 'Server' in table:
+            return [table['Server']]
+        return []
     return table
 
 
@@ -852,8 +731,128 @@ CHANGE_TABLE_ELEMS = {
     'ms-sql-info': change_ms_sql_info,
     'ssh-hostkey': change_ssh_hostkey,
     'http-git': change_http_git,
+    'http-server-header': change_http_server_header,
+}
+
+
+def change_ssl_cert(out, table):
+    """Fix modulus and exponent value in "ssl-cert" Nmap script. A bug
+exists in some Nmap versions that reports "BIGNUM: 0x<memory address>"
+instead of the value for fields `.modulus` and `.exponent` of
+`.pubkey`.
+
+In newer versions, the output has been fixed, **but** the exponent is
+written as a decimal number and the modulus as an hexadecimal number
+(see comments there: <https://github.com/nmap/nmap/commit/0f3a8a7>.
+
+Anyway, we first try to use our own parser, to get more information
+than Nmap would report.
+
+    """
+    if not isinstance(table, dict):
+        return out, [table]
+    if 'pem' in table:
+        # Let's try out own parser first
+        data = ''.join(table['pem'].splitlines()[1:-1]).encode()
+        try:
+            return create_ssl_cert(data)
+        except Exception:
+            utils.LOGGER.warning('Cannot parse certificate %r', data,
+                                 exc_info=True)
+    if 'pubkey' not in table:
+        return out, [table]
+    pubkey = table['pubkey']
+    for key in ["modulus", "exponent"]:
+        if (
+                isinstance(pubkey.get(key), str) and
+                pubkey[key].startswith('BIGNUM: ')
+        ):
+            del pubkey[key]
+    if isinstance(pubkey.get("modulus"), str):
+        try:
+            pubkey["modulus"] = str(int(pubkey["modulus"], 16))
+        except ValueError:
+            utils.LOGGER.warning('Cannot convert modulus to decimal [%r]',
+                                 pubkey["modulus"])
+    return out, [table]
+
+
+def change_ssh2_enum_algos(out, table):
+    """Adapt human readable and structured outputs generated by the
+"ssh2-enum-algos" Nmap script to add the HASSH value.
+
+New in SCHEMA_VERSION == 18.
+
+    """
+    hasshval = ";".join(
+        ",".join(table.get(key, []))
+        for key in ["kex_algorithms", "encryption_algorithms",
+                    "mac_algorithms", "compression_algorithms"]
+    )
+    hassh = {
+        "version": "1.1",
+        "raw": hasshval,
+    }
+    hasshval = hasshval.encode()
+    hassh.update((hashtype, hashlib.new(hashtype, hasshval).hexdigest())
+                 for hashtype in ['md5', 'sha1', 'sha256'])
+    table["hassh"] = hassh
+    new_out = ['', '  HASSH']
+    new_out.extend(
+        '    %s: %s' % (key, hassh[key])
+        for key in ['version', 'raw', 'md5', 'sha1', 'sha256']
+    )
+    out += '\n'.join(new_out)
+    return out, table
+
+
+CHANGE_OUTPUT_TABLE_ELEMS = {
+    'ssh2-enum-algos': change_ssh2_enum_algos,
     'ssl-cert': change_ssl_cert,
 }
+
+
+def post_smb_os_discovery(script, port, host):
+    if 'smb-os-discovery' not in script:
+        return
+    data = script['smb-os-discovery']
+    if 'fqdn' not in data:
+        return
+    add_hostname(data['fqdn'], 'smb', host.setdefault('hostnames', []))
+
+
+def post_ssl_cert(script, port, host):
+    # We do not want to add hostnames from ssl-cacert results
+    if script['id'] != 'ssl-cert':
+        return
+    for cert in script.get('ssl-cert', []):
+        add_cert_hostnames(cert, host.setdefault('hostnames', []))
+
+
+def post_ntlm_info(script, port, host):
+    if 'ntlm-info' not in script:
+        return
+    data = script['ntlm-info']
+    if 'DNS_Computer_Name' not in data:
+        return
+    add_hostname(data['DNS_Computer_Name'], 'ntlm',
+                 host.setdefault('hostnames', []))
+
+
+def post_http_headers(script, port, host):
+    if 'http-headers' not in script:
+        return
+    handle_http_headers(host, port, script['http-headers'],
+                        handle_server=False)
+
+
+POST_PROCESS = {
+    "http-headers": post_http_headers,
+    "smb-os-discovery": post_smb_os_discovery,
+    "ssl-cert": post_ssl_cert,
+    "ntlm-info": post_ntlm_info,
+}
+
 
 IGNORE_SCRIPTS = {
     'mcafee-epo-agent': set(['ePO Agent not found']),
@@ -1066,6 +1065,7 @@ NMAP_S7_INDEXES = {
 MASSCAN_SERVICES_NMAP_SCRIPTS = {
     "http": "http-headers",
     "title": "http-title",
+    "html": "http-content",
     "ftp": "banner",
     "unknown": "banner",
     "ssh": "ssh-banner",
@@ -1073,7 +1073,9 @@ MASSCAN_SERVICES_NMAP_SCRIPTS = {
     "imap": "banner",
     "pop": "banner",
     "X509": "ssl-cert",
+    "X509CA": "ssl-cacert",
     "s7comm": "s7-info",
+    "telnet": "banner",
 }
 
 MASSCAN_NMAP_SCRIPT_NMAP_PROBES = {
@@ -1093,10 +1095,16 @@ MASSCAN_SERVICES_NMAP_SERVICES = {
     "pop": "pop3",
     "smtp": "smtp",
     "s7comm": "iso-tsap",
+    "telnet": "telnet",
 }
 
 
 MASSCAN_ENCODING = re.compile(re.escape(b"\\x") + b"([0-9a-f]{2})")
+_HTTP_HEADER = re.compile(
+    b"^([!\\#\\$%\\&'\\*\\+\\-\\.\\^_`\\|\\~A-Z0-9]+):[ \\\t]*([^\\\r]*)"
+    b"[ \\\t\\\r]*$",
+    re.I
+)
 
 
 def _masscan_decode_print(match):
@@ -1246,54 +1254,128 @@ X509 "service" tag.
         cert = data
         data = utils.encode_b64(cert)
     info = utils.get_cert_info(cert)
-    newout = []
-    for key, name in [('subject_text', 'Subject'),
-                      ('issuer_text', 'Issuer')]:
-        try:
-            newout.append('%s: %s' % (name, info[key]))
-        except KeyError:
-            pass
-    try:
-        pubkeyalgo = info.pop('pubkeyalgo')
-    except KeyError:
-        pass
-    else:
-        pubkeytype = {
-            'rsaEncryption': 'rsa',
-            'id-ecPublicKey': 'ec',
-            'id-dsa': 'dsa',
-            'dhpublicnumber': 'dh',
-        }.get(pubkeyalgo, pubkeyalgo)
-        newout.append('Public Key type: %s' % pubkeytype)
-        info['pubkey'] = {'type': pubkeytype}
-    try:
-        pubkeybits = info.pop('bits')
-    except KeyError:
-        pass
-    else:
-        newout.append('Public Key bits: %d' % pubkeybits)
-        info.setdefault('pubkey', {})['bits'] = pubkeybits
-    for key in ['modulus', 'exponent']:
-        try:
-            info.setdefault('pubkey', {})[key] = info.pop(key)
-        except KeyError:
-            pass
-    for key, name in [('md5', 'MD5:'), ('sha1', 'SHA-1:'),
-                      ('sha256', 'SHA-256:')]:
-        # NB: SHA-256 is not (yet) reported by Nmap, but it might help.
-        try:
-            newout.append('%-7s%s' % (name, ' '.join(wrap(info[key], 4))))
-        except KeyError:
-            pass
     b64cert = data.decode()
     pem = []
     pem.append('-----BEGIN CERTIFICATE-----')
-    pem.extend(b64cert[i:i + 64] for i in range(0, len(b64cert), 64))
+    pem.extend(wrap(b64cert, 64))
     pem.append('-----END CERTIFICATE-----')
     pem.append('')
-    newout.extend(pem)
     info['pem'] = '\n'.join(pem)
-    return newout, info
+    return '\n'.join(create_ssl_output(info)), [info]
+
+
+_EXPR_INDEX_OF = re.compile(
+    '<title[^>]*> *(?:index +of|directory +listing +(?:of|for))', re.I,
+)
+_EXPR_FILES = [
+    re.compile('<a href="(?P<filename>[^"]+)">[^<]+</a></td><td[^>]*> *'
+               '(?P<time>[0-9]+-[a-z0-9]+-[0-9]+ [0-9]+:[0-9]+) *'
+               '</td><td[^>]*> *(?P<size>[^<]+)</td>', re.I),
+    re.compile('<a href="(?P<filename>[^"]+)">[^<]+</a> *'
+               '(?P<time>[0-9]+-[a-z0-9]+-[0-9]+ [0-9]+:[0-9]+) *'
+               '(?P<size>[^ \r\n]+)', re.I),
+    re.compile('<li><a href="(?P<filename>[^"]+)">(?P=filename)</a>')
+]
+
+
+def create_http_ls(data, url=None):
+    """Produces an http-ls script output (both structured and human
+readable) from the content of an HTML page. Used for Zgrab and Masscan
+results.
+
+    """
+    match = _EXPR_INDEX_OF.search(data)
+    if match is None:
+        return None
+    files = []
+    for pattern in _EXPR_FILES:
+        for match in pattern.finditer(data):
+            files.append(match.groupdict())
+    if not files:
+        return None
+    output = []
+    if url is None or 'path' not in url:
+        volname = "???"
+    else:
+        volname = url['path']
+    output.append('Volume %s' % volname)
+    title = ['size', 'time', 'filename']
+    column_width = [len(t) for t in title[:-1]]
+    for fobj in files:
+        for i, t in enumerate(title[:-1]):
+            column_width[i] = max(column_width[i],
+                                  len(fobj.get(t, "-")))
+    line_fmt = ('%%(size)-%ds  %%(time)-%ds  %%(filename)s' %
+                tuple(column_width))
+    output.append(line_fmt % dict((t, t.upper()) for t in title))
+    for fobj in files:
+        output.append(line_fmt % dict({"size": "-", "time": "-"}, **fobj))
+    output.append("")
+    return {
+        'id': 'http-ls', 'output': '\n'.join(output),
+        'ls': {'volumes': [{'volume': volname, 'files': files}]},
+    }
+
+
+def create_elasticsearch_service(data):
+    """Produces the service_* attributes from the (JSON) content of an
+HTTP response. Used for Zgrab and Masscan results.
+
+    """
+    try:
+        data = json.loads(data)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if 'tagline' not in data:
+        if 'error' not in data:
+            return None
+        error = data['error']
+        if isinstance(error, str):
+            if (
+                    data.get('status') == 401 and
+                    error.startswith('AuthenticationException')
+            ):
+                return {'service_name': 'http',
+                        'service_product': 'Elasticsearch REST API',
+                        'service_extrainfo': 'Authentication required',
+                        'cpe': ['cpe:/a:elasticsearch:elasticsearch']}
+            return None
+        if not isinstance(error, dict):
+            return None
+        if not (data.get('status') == 401 or error.get('status') == 401):
+            return None
+        if 'root_cause' in error:
+            return {'service_name': 'http',
+                    'service_product': 'Elasticsearch REST API',
+                    'service_extrainfo': 'Authentication required',
+                    'cpe': ['cpe:/a:elasticsearch:elasticsearch']}
+        return None
+    if data['tagline'] != 'You Know, for Search':
+        return None
+    result = {'service_name': 'http',
+              'service_product': 'Elasticsearch REST API'}
+    cpe = []
+    if 'version' in data and 'number' in data['version']:
+        result['service_version'] = data['version']['number']
+        cpe.append('cpe:/a:elasticsearch:elasticsearch:%s' %
+                   data['version']['number'])
+    extrainfo = []
+    if 'name' in data:
+        extrainfo.append('name: %s' % data['name'])
+        result['hostname'] = data['name']
+    if 'cluster_name' in data:
+        extrainfo.append('cluster: %s' % data['cluster_name'])
+    if 'version' in data and 'lucene_version' in data['version']:
+        extrainfo.append('Lucene %s' % data['version']['lucene_version'])
+        cpe.append('cpe:/a:apache:lucene:%s' %
+                   data['version']['lucene_version'])
+    if extrainfo:
+        result['service_extrainfo'] = '; '.join(extrainfo)
+    if cpe:
+        result['cpe'] = cpe
+    return result
 
 
 def ignore_script(script):
@@ -1322,33 +1404,67 @@ def ignore_script(script):
     return False
 
 
-def cpe2dict(cpe_str):
-    """Helper function to parse CPEs. This is a very partial/simple parser.
+# This is not a real hostname regexp, but a simple way to exclude
+# obviously wrong values. Underscores should not exist in (DNS)
+# hostnames, but since they happen to exist anyway, we allow them
+# here.
+_HOSTNAME = re.compile('^[a-z0-9_\\.\\*\\-]+$', re.I)
 
-    Raises:
-        ValueError if the cpe string is not parsable.
 
-    """
-    # Remove prefix
-    if not cpe_str.startswith("cpe:/"):
-        raise ValueError("invalid cpe format (%s)\n" % cpe_str)
-    cpe_body = cpe_str[5:]
-    parts = cpe_body.split(":", 3)
-    nparts = len(parts)
-    if nparts < 2:
-        raise ValueError("invalid cpe format (%s)\n" % cpe_str)
-    cpe_type = parts[0]
-    cpe_vend = parts[1]
-    cpe_prod = parts[2] if nparts > 2 else ""
-    cpe_vers = parts[3] if nparts > 3 else ""
+def add_hostname(name, name_type, hostnames):
+    name = name.rstrip('.').lower()
+    if not _HOSTNAME.search(name):
+        return
+    # exclude IPv4 addresses
+    if utils.IPV4ADDR.search(name):
+        return
+    if any(hn['name'] == name and hn['type'] == name_type
+           for hn in hostnames):
+        return
+    hostnames.append({
+        'type': name_type,
+        'name': name,
+        'domains': list(utils.get_domains(name)),
+    })
 
-    ret = {
-        "type": cpe_type,
-        "vendor": cpe_vend,
-        "product": cpe_prod,
-        "version": cpe_vers,
-    }
-    return ret
+
+def add_service_hostname(service_info, hostnames):
+    if 'service_hostname' not in service_info:
+        return
+    name = service_info['service_hostname']
+    if 'service_extrainfo' in service_info:
+        for data in service_info[
+                'service_extrainfo'
+        ].lower().split(', '):
+            if data.startswith('domain:'):
+                name += '.' + data[7:].strip()
+                break
+    add_hostname(name, 'service', hostnames)
+
+
+def add_cert_hostnames(cert, hostnames):
+    if 'commonName' in cert.get('subject', {}):
+        add_hostname(cert['subject']['commonName'], 'cert-subject-cn',
+                     hostnames)
+    for san in cert.get('san', []):
+        if san.startswith('DNS:'):
+            add_hostname(san[4:], 'cert-san-dns', hostnames)
+            continue
+        if san.startswith('URI:'):
+            try:
+                netloc = urlparse(san[4:]).netloc
+            except Exception:
+                utils.LOGGER.warning('Invalid URL in SAN %r', san,
+                                     exc_info=True)
+                continue
+            if not netloc:
+                continue
+            if netloc.startswith('['):
+                # IPv6
+                continue
+            if ':' in netloc:
+                netloc = netloc.split(':', 1)[0]
+            add_hostname(netloc, 'cert-san-uri', hostnames)
 
 
 class NoExtResolver(EntityResolver):
@@ -1409,8 +1525,11 @@ class NmapHandler(ContentHandler):
     def _pre_addhost(self):
         """Executed before _addhost for host object post-treatment"""
         if 'cpes' in self._curhost:
-            cpes = self._curhost['cpes']
-            self._curhost['cpes'] = list(viewvalues(cpes))
+            self._curhost['cpes'] = list(viewvalues(self._curhost['cpes']))
+            for cpe in self._curhost['cpes']:
+                cpe['origins'] = sorted(cpe['origins'])
+            if not self._curhost['cpes']:
+                del self._curhost['cpes']
 
     def _addhost(self):
         """Subclasses may store self._curhost here."""
@@ -1473,11 +1592,17 @@ argument (a dict object).
                     'addresses', {}).setdefault(
                         attrs['addrtype'], []).append(attrs['addr'])
         elif name == 'hostnames':
+            if self._curhost is None:
+                # We do not want to handle hostnames in hosthint tags,
+                # as they will be repeated inside an host tag
+                return
             if self._curhostnames is not None:
                 utils.LOGGER.warning("self._curhostnames should be None at "
                                      "this point (got %r)", self._curhostnames)
             self._curhostnames = []
         elif name == 'hostname':
+            if self._curhost is None:
+                return
             if self._curhostnames is None:
                 utils.LOGGER.warning("self._curhostnames should NOT be "
                                      "None at this point")
@@ -1562,14 +1687,15 @@ argument (a dict object).
                         "raw": self._to_binary(raw_output),
                         "encoded": banner,
                     }
+                    if banner.startswith('ERR unknown response'):
+                        # skip this part of the banner, which gets stored as:
+                        # "ERR unknown responseERROR(UNKNOWN)"
+                        banner = banner[20:]
                     if banner.startswith('ERROR'):
-                        self._curhost.setdefault('ports', []).append({
-                            'port': -1,
-                            'scripts': [{
-                                'id': 'smb-os-discovery',
-                                'output': banner,
-                                'masscan': masscan_data,
-                            }],
+                        self._curport.setdefault('scripts', []).append({
+                            'id': 'smb-os-discovery',
+                            'output': banner,
+                            'masscan': masscan_data,
                         })
                         return
                     data = {}
@@ -1581,15 +1707,19 @@ argument (a dict object).
                             try:
                                 idx = banner.index(' ')
                             except ValueError:
-                                data['version'] = banner
+                                data['smb-version'] = banner
                                 banner = ""
                             else:
-                                data['version'] = banner[:idx]
+                                data['smb-version'] = banner[:idx]
                                 banner = banner[idx:]
                             continue
                         # os values may contain spaces
                         if banner.startswith('os=') or \
-                           banner.startswith('ver='):
+                           banner.startswith('ver=') or \
+                           banner.startswith('domain=') or \
+                           banner.startswith('name=') or \
+                           banner.startswith('domain-dns=') or \
+                           banner.startswith('name-dns='):
                             key, banner = banner.split('=', 1)
                             value = []
                             while banner and not re.compile(
@@ -1628,8 +1758,12 @@ argument (a dict object).
                                 tzone = '%+03d%02d' % (tzone // 60, tzone % 60)
                             else:
                                 tzone = ""
-                            if tstamp.startswith('60056-05-28 '):
-                                # maximum windows timestamp value
+                            if not utils.STRPTIME_SUPPORTS_TZ:
+                                # %z is not supported with strptime()
+                                tzone = ""
+                            if tstamp.startswith('1601-01-01 ') or \
+                               tstamp.startswith('60056-05-28 '):
+                                # minimum / maximum windows timestamp value
                                 continue
                             try:
                                 data[key] = datetime.datetime.strptime(
@@ -1658,18 +1792,29 @@ argument (a dict object).
                         data[key] = value
                     smb_os_disco = {}
                     smb_os_disco_output = ['']
+                    if 'os' in data:
+                        smb_os_disco['os'] = data['os']
+                        if 'ver' in data:
+                            smb_os_disco_output.append("  OS: %s (%s)" % (
+                                data['os'], data['ver']
+                            ))
+                            smb_os_disco['lanmanager'] = data['ver']
+                        else:
+                            smb_os_disco_output.append("  OS: %s" % data['os'])
+                    elif 'ver' in data:
+                        smb_os_disco_output.append("  OS: - (%s)" %
+                                                   data['ver'])
+                        smb_os_disco['lanmanager'] = data['ver']
                     for masscankey, nmapkey, humankey in [
                             ('name', 'server', 'NetBIOS computer name'),
-                            ('domain', 'workgroup', None),
+                            ('domain', 'workgroup', 'Workgroup'),
                             ('name-dns', 'fqdn', 'FQDN'),
                             ('domain-dns', 'domain_dns', 'Domain name'),
-                            ('forest', 'forest_dns', 'Forest name')
-                            # TODO
-                            # ('guid', 'guid', None),
-                            # ('ntlm-ver', 'guid', None),
-                            # ('os', 'guid', None),
-                            # ('ver', 'guid', None),
-                            # ('version', 'guid', None),
+                            ('forest', 'forest_dns', 'Forest name'),
+                            ('version', 'ntlm-os', 'Version (from NTLM)'),
+                            ('ntlm-ver', 'ntlm-version', 'NTLM version'),
+                            ('smb-version', 'smb-version', 'SMB version'),
+                            ('guid', 'guid', 'GUID'),
                     ]:
                         if masscankey in data:
                             smb_os_disco[nmapkey] = data[masscankey]
@@ -1678,17 +1823,27 @@ argument (a dict object).
                                     humankey,
                                     data[masscankey],
                                 ))
-                    scripts = []
+                    if 'fqdn' in smb_os_disco:
+                        add_hostname(smb_os_disco['fqdn'], 'smb',
+                                     self._curhost.setdefault('hostnames', []))
+                    scripts = self._curport.setdefault('scripts', [])
                     if 'time' in data:
-                        # FIXME TIME ZONE
-                        smb_os_disco['date'] = data['time'].strftime(
-                            '%Y-%m-%dT%H:%M:%S'
-                        )
-                        smb_os_disco_output.append(
-                            '  System time: %s' % smb_os_disco['date']
-                        )
-                        smb2_time = {'date': str(data['time'])}
-                        smb2_time_out = ['', '  date: %s' % data['time']]
+                        smb2_time = {}
+                        smb2_time_out = ['']
+                        try:
+                            # FIXME TIME ZONE
+                            smb_os_disco['date'] = data['time'].strftime(
+                                '%Y-%m-%dT%H:%M:%S'
+                            )
+                        except ValueError:
+                            # year == 1601
+                            pass
+                        else:
+                            smb_os_disco_output.append(
+                                '  System time: %s' % smb_os_disco['date']
+                            )
+                            smb2_time['date'] = str(data['time'])
+                            smb2_time_out.append('  date: %s' % data['time'])
                         if 'boottime' in data:
                             # Masscan has to be patched to report
                             # this.
@@ -1696,21 +1851,18 @@ argument (a dict object).
                             smb2_time_out.append(
                                 '  start_time: %s' % data['boottime']
                             )
-                        scripts.append({
-                            'id': 'smb2-time',
-                            'smb2-time': smb2_time,
-                            'output': '\n'.join(smb2_time_out)
-                        })
+                        if smb2_time:
+                            scripts.append({
+                                'id': 'smb2-time',
+                                'smb2-time': smb2_time,
+                                'output': '\n'.join(smb2_time_out)
+                            })
                     smb_os_disco_output.append('')
                     scripts.append({
                         'id': 'smb-os-discovery',
                         'smb-os-discovery': smb_os_disco,
                         'output': '\n'.join(smb_os_disco_output),
                         'masscan': masscan_data,
-                    })
-                    self._curhost.setdefault('ports', []).append({
-                        'port': -1,
-                        'scripts': scripts,
                     })
                     return
                 # create fake scripts from masscan "service" tags
@@ -1757,19 +1909,44 @@ argument (a dict object).
                                 'masscan'
                             ] = masscan_data
                         return
+                    # tcp/dicom: use our own parser
+                    if self._curport['protocol'] == 'tcp' and \
+                       probe == 'dicom':
+                        masscan_data = script["masscan"]
+                        self._curport.update(dicom.parse_message(raw_output))
+                        if self._curport.get('service_name') == 'dicom':
+                            self._curport['scripts'][0][
+                                'masscan'
+                            ] = masscan_data
+                        return
                     if self._curport.get('service_name') in ['ftp', 'imap',
                                                              'pop3', 'smtp',
                                                              'ssh']:
                         raw_output = raw_output.split(
                             b'\n', 1
                         )[0].rstrip(b'\r')
-                    match = utils.match_nmap_svc_fp(
+                    new_match = utils.match_nmap_svc_fp(
                         output=raw_output,
                         proto=self._curport['protocol'],
                         probe=probe,
+                        soft=True,
                     )
+                    if new_match and (not match or
+                                      (match.get('soft') and
+                                       not new_match.get('soft'))):
+                        match = new_match
                 if match:
+                    try:
+                        del match['soft']
+                    except KeyError:
+                        pass
+                    for cpe in match.pop('cpe', []):
+                        self._add_cpe_to_host(cpe=cpe)
                     self._curport.update(match)
+                    add_service_hostname(
+                        match,
+                        self._curhost.setdefault('hostnames', []),
+                    )
                 return
             for attr in attrs.keys():
                 self._curport['service_%s' % attr] = attrs[attr]
@@ -1777,6 +1954,8 @@ argument (a dict object).
                           'service_lowver', 'service_highver']:
                 if field in self._curport:
                     self._curport[field] = int(self._curport[field])
+            add_service_hostname(self._curport,
+                                 self._curhost.setdefault('hostnames', []))
         elif name == 'script':
             if self._curscript is not None:
                 utils.LOGGER.warning("self._curscript should be None at this "
@@ -1889,10 +2068,13 @@ argument (a dict object).
                     # hosts with an open port are marked as up by
                     # default (masscan)
                     self._curhost['state'] = 'up'
+                cleanup_synack_honeypot_host(self._curhost)
                 self._pre_addhost()
                 self._addhost()
             self._curhost = None
         elif name == 'hostnames':
+            if self._curhost is None:
+                return
             self._curhost['hostnames'] = self._curhostnames
             self._curhostnames = None
         elif name == 'extraports':
@@ -1952,6 +2134,8 @@ argument (a dict object).
                                     screenwords = utils.screenwords(data)
                                     if screenwords is not None:
                                         current['screenwords'] = screenwords
+                                else:
+                                    current['screenshot'] = "empty"
                         except Exception:
                             exceptions.append((sys.exc_info(), full_fname))
                         else:
@@ -1969,14 +2153,22 @@ argument (a dict object).
                 self._curtable = {}
                 self._curscript = None
                 return
-            infokey = self._curscript.get('id', None)
-            infokey = ALIASES_TABLE_ELEMS.get(infokey, infokey)
+            key = self._curscript.get('id', None)
+            infokey = ALIASES_TABLE_ELEMS.get(key, key)
             if self._curtable:
                 if self._curtablepath:
                     utils.LOGGER.warning("self._curtablepath should be empty, "
                                          "got [%r]", self._curtablepath)
                 if infokey in CHANGE_TABLE_ELEMS:
                     self._curtable = CHANGE_TABLE_ELEMS[infokey](
+                        self._curtable
+                    )
+                elif infokey in CHANGE_OUTPUT_TABLE_ELEMS:
+                    (
+                        self._curscript['output'],
+                        self._curtable,
+                    ) = CHANGE_OUTPUT_TABLE_ELEMS[infokey](
+                        self._curscript.get('output', ''),
                         self._curtable
                     )
                 self._curscript[infokey] = self._curtable
@@ -1997,6 +2189,8 @@ argument (a dict object).
                     infos = infos(self._curscript)
                     if infos is not None:
                         self._curscript[infokey] = infos
+            if infokey in POST_PROCESS:
+                POST_PROCESS[infokey](self._curscript, current, self._curhost)
             current.setdefault('scripts', []).append(self._curscript)
             self._curscript = None
         elif name in ['table', 'elem']:
@@ -2036,8 +2230,10 @@ argument (a dict object).
         try:
             function = {
                 "http-headers": self.masscan_post_http,
+                "http-content": self.masscan_post_http_content,
                 "s7-info": self.masscan_post_s7info,
                 "ssl-cert": self.masscan_post_x509,
+                "ssl-cacert": self.masscan_post_x509,
                 "ssh-banner": self.masscan_post_ssh,
             }[script['id']]
         except KeyError:
@@ -2128,7 +2324,7 @@ argument (a dict object).
             data = data[4:]
             curdata, data = data[:length], data[length:]
             if curdata:
-                yield keys.pop(), curdata.decode().split(',')
+                yield keys.pop(), utils.nmap_encode_data(curdata).split(',')
             else:
                 yield keys.pop(), []
 
@@ -2143,6 +2339,16 @@ argument (a dict object).
         except ValueError:
             return
         script['output'] = utils.nmap_encode_data(data[:idx].rstrip(b'\r'))
+        if 'service_product' not in self._curport:
+            # some Nmap fingerprints won't match with data after the
+            # banner
+            match = utils.match_nmap_svc_fp(output=data[:idx + 1],
+                                            proto=self._curport['protocol'],
+                                            probe="NULL")
+            if match:
+                for cpe in match.pop('cpe', []):
+                    self._add_cpe_to_host(cpe=cpe)
+                self._curport.update(match)
         # this requires a patched version of masscan
         for msgtype, msg in self._read_ssh_msgs(data[idx + 1:]):
             if msgtype == 20:  # key exchange init
@@ -2152,7 +2358,7 @@ argument (a dict object).
                     keyc2s, keys2c = ('%s_client_to_server' % key,
                                       '%s_server_to_client' % key)
                     if keyc2s in ssh2_enum and \
-                       ssh2_enum[keyc2s] == ssh2_enum[keys2c]:
+                       ssh2_enum[keyc2s] == ssh2_enum.get(keys2c):
                         ssh2_enum[key] = ssh2_enum.pop(keyc2s)
                         del ssh2_enum[keys2c]
                 # preserve output order
@@ -2173,9 +2379,13 @@ argument (a dict object).
                         value = ssh2_enum[key]
                         ssh2_enum_out.append('  %s (%d)' % (key, len(value)))
                         ssh2_enum_out.extend('      %s' % v for v in value)
+                ssh2_enum_out, ssh2_enum = change_ssh2_enum_algos(
+                    '\n'.join(ssh2_enum_out),
+                    ssh2_enum,
+                )
                 self._curport.setdefault('scripts', []).append({
                     'id': 'ssh2-enum-algos',
-                    'output': '\n'.join(ssh2_enum_out),
+                    'output': ssh2_enum_out,
                     'ssh2-enum-algos': ssh2_enum,
                 })
                 continue
@@ -2186,8 +2396,11 @@ argument (a dict object).
                 # TODO this might be somehow factorized with
                 # view.py:_extract_passive_SSH_SERVER_HOSTKEY()
                 value = utils.encode_b64(host_key_length_data).decode()
-                ssh_hostkey = {'type': info['algo'],
-                               'key': value}
+                try:
+                    ssh_hostkey = {'type': info['algo'],
+                                   'key': value}
+                except KeyError:
+                    continue
                 if 'bits' in info:
                     ssh_hostkey['bits'] = info['bits']
                 ssh_hostkey['fingerprint'] = info['md5']
@@ -2224,36 +2437,72 @@ argument (a dict object).
                                  exc_info=True)
             return
         if output_data:
-            script["output"] = "\n".join(output_text)
-            script[script["id"]] = output_data
+            script["output"] = output_text
+            script["ssl-cert"] = output_data
+            if script['id'] == 'ssl-cert':
+                for cert in output_data:
+                    add_cert_hostnames(
+                        cert,
+                        self._curhost.setdefault('hostnames', []),
+                    )
 
     def masscan_post_http(self, script):
-        header = re.search(
-            re.escape(b'\nServer:') + b'[ \\\t]*([^\\\r\\\n]*)\\\r?(?:\\\n|$)',
-            self._from_binary(script['masscan']['raw']),
+        raw = self._from_binary(script['masscan']['raw'])
+        self._curport['service_name'] = 'http'
+        match = utils.match_nmap_svc_fp(
+            raw, proto="tcp", probe="GetRequest",
         )
-        if header is None:
-            return
-        header = header.groups()[0]
-        if not header:
-            return
-        self._curport.setdefault('scripts', []).append({
-            "id": "http-server-header",
-            "output": utils.nmap_encode_data(header),
-            "masscan": {
-                "raw": self._to_binary(header),
-            },
-        })
-        # XXX use fingerprints
-        self._curport['service_product'] = utils.nmap_encode_data(header)
+        if match:
+            for cpe in match.pop('cpe', []):
+                self._add_cpe_to_host(cpe=cpe)
+        self._curport.update(match)
+        try:
+            script['http-headers'] = [
+                {
+                    "name": '_status',
+                    "value":
+                    utils.nmap_encode_data(raw.split(b'\n', 1)[0].strip()),
+                }
+            ]
+        except IndexError:
+            script['http-headers'] = []
+        script['http-headers'].extend(
+            {"name": utils.nmap_encode_data(hdrname).lower(),
+             "value": utils.nmap_encode_data(hdrval)}
+            for hdrname, hdrval in (
+                m.groups() for m in (
+                    _HTTP_HEADER.search(part.strip())
+                    for part in raw.split(b'\n')
+                ) if m
+            )
+        )
+        handle_http_headers(self._curhost, self._curport,
+                            script['http-headers'])
 
-    def _add_cpe_to_host(self):
-        """Adds the cpe in self._curdata to the host-wide cpe list, taking
-        port/script/osmatch context into account.
+    def masscan_post_http_content(self, script):
+        self._curport['service_name'] = 'http'
+        raw = self._from_binary(script['masscan']['raw'])
+        script_http_ls = create_http_ls(script['output'])
+        service_elasticsearch = create_elasticsearch_service(script['output'])
+        script['output'] = utils.nmap_encode_data(raw)
+        if script_http_ls:
+            self._curport.setdefault('scripts', []).append(script_http_ls)
+        if service_elasticsearch:
+            if 'hostname' in service_elasticsearch:
+                add_hostname(service_elasticsearch.pop('hostname'), 'service',
+                             self._curhost.setdefault('hostnames', []))
+            for cpe in service_elasticsearch.pop('cpe', []):
+                self._add_cpe_to_host(cpe=cpe)
+            self._curport.update(service_elasticsearch)
+
+    def _add_cpe_to_host(self, cpe=None):
+        """Adds the cpe (from `cpe` or from self._curdata) to the host-wide
+        cpe list, taking port/script/osmatch context into account.
 
         """
-        cpe = self._curdata
-        self._curdata = None
+        if cpe is None:
+            cpe = self._curdata
+            self._curdata = None
         path = None
 
         # What is the path to reach this CPE?
@@ -2287,7 +2536,7 @@ argument (a dict object).
             cpes[cpe] = cpeobj
         else:
             cpeobj = cpes[cpe]
-        cpeobj.setdefault('origins', []).append(path)
+        cpeobj.setdefault('origins', set()).add(path)
 
     def characters(self, content):
         if self._curdata is not None:

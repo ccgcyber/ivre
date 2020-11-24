@@ -19,14 +19,7 @@
 """Put selected results in views."""
 
 from __future__ import print_function
-try:
-    import argparse
-except ImportError:
-    from itertools import chain
-    import optparse
-    USING_ARGPARSE = False
-else:
-    USING_ARGPARSE = True
+import argparse
 import os
 import sys
 
@@ -43,23 +36,10 @@ from ivre.utils import display_top, CLI_ARGPARSER
 
 
 def main():
-    if USING_ARGPARSE:
-        parser = argparse.ArgumentParser(
-            description='Print out views.',
-            parents=[db.view.argparser, CLI_ARGPARSER])
-    else:
-        parser = optparse.OptionParser(
-            description='Print out views.')
-        for args, kargs in chain(db.view.argparser.args, CLI_ARGPARSER):
-            parser.add_option(*args, **kargs)
-        parser.parse_args_orig = parser.parse_args
-
-        def my_parse_args():
-            res = parser.parse_args_orig()
-            res[0].ensure_value('ips', res[1])
-            return res[0]
-        parser.parse_args = my_parse_args
-        parser.add_argument = parser.add_option
+    parser = argparse.ArgumentParser(
+        description='Print out views.',
+        parents=[db.view.argparser, CLI_ARGPARSER],
+    )
 
     flt = db.view.flt_empty
 
@@ -152,6 +132,9 @@ def main():
     if args.explain:
         displayfunction_explain(flt, db.view)
         sys.exit(0)
+    if args.delete:
+        displayfunction_remove(flt, db.view)
+        sys.exit(0)
     if args.json:
         def displayfunction(x):
             return displayfunction_json(
@@ -169,9 +152,6 @@ def main():
                 x, args.graphroute, args.graphroute_include,
                 args.graphroute_dont_reset
             )
-    elif args.delete:
-        def displayfunction(x):
-            return displayfunction_remove(x, db.view)
     elif args.csv is not None:
         def displayfunction(x):
             return displayfunction_csv(

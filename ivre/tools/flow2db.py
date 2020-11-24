@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -19,45 +19,38 @@
 """Update the flow database from log files"""
 
 
+from argparse import ArgumentParser
+
+
 from ivre import config
 from ivre import utils
 from ivre.db import db
 # from ivre.parser.airodump import Airodump
 from ivre.parser.argus import Argus
-# from ivre.parser.bro import BroFile
 from ivre.parser.netflow import NetFlow
 from ivre.parser.iptables import Iptables
 
 PARSERS_CHOICE = {
     # 'airodump': Airodump,
     'argus': Argus,
-    # 'bro': BroFile,
     'netflow': NetFlow,
     'iptables': Iptables,
 }
 
 
 PARSERS_MAGIC = {
-    # Pcap: ARP
-    # '\xa1\xb2\xd3\xc4': None,
-    # '\xd4\xc3\xb2\xa1': None,
     # NetFlow
     b'\x0c\xa5\x01\x00': NetFlow,
     # Argus
     b'\x83\x10\x00\x20': Argus,
-    # Bro
-    # '#sep': BroFile,
-    # Airodump CSV
-    # '\x0d\x0aBS': Airodump,
 }
 
 
 def main():
     """Update the flow database from log files"""
-    parser, use_argparse = utils.create_argparser(__doc__, extraargs='files')
-    if use_argparse:
-        parser.add_argument('files', nargs='*', metavar='FILE',
-                            help='Files to import in the flow database')
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument('files', nargs='*', metavar='FILE',
+                        help='Files to import in the flow database')
     parser.add_argument("-v", "--verbose", help="verbose mode",
                         action="store_true")
     parser.add_argument("-t", "--type", help="file type",

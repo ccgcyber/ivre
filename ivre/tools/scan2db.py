@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -21,7 +21,9 @@
 
 
 from __future__ import print_function
+from argparse import ArgumentParser
 import os
+import sys
 
 
 import ivre.db
@@ -31,21 +33,30 @@ import ivre.xmlnmap
 from ivre.view import nmap_record_to_view
 
 
-def recursive_filelisting(base_directories):
-    "Iterator on filenames in base_directories"
+def recursive_filelisting(base_directories, error):
+    """Iterator on filenames in base_directories. Ugly hack: error is a
+one-element list that will be set to True if one of the directories in
+base_directories does not exist.
+
+    """
 
     for base_directory in base_directories:
+        if not os.path.exists(base_directory):
+            ivre.utils.LOGGER.warning('directory %r does not exist',
+                                      base_directory)
+            error[0] = True
+            continue
+        if not os.path.isdir(base_directory):
+            yield base_directory
+            continue
         for root, _, files in os.walk(base_directory):
             for leaffile in files:
                 yield os.path.join(root, leaffile)
 
 
 def main():
-    parser, use_argparse = ivre.utils.create_argparser(__doc__,
-                                                       extraargs='scan')
-    if use_argparse:
-        parser.add_argument('scan', nargs='*', metavar='SCAN',
-                            help='Scan results')
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument('scan', nargs='*', metavar='SCAN', help='Scan results')
     parser.add_argument('-c', '--categories', default='',
                         help='Scan categories.')
     parser.add_argument('-s', '--source', default=None,
@@ -58,11 +69,6 @@ def main():
                         help='Store only hosts with a "ports" element.')
     parser.add_argument('--open-ports', action='store_true',
                         help='Store only hosts with open ports.')
-    parser.add_argument('--merge', action='store_true', help='Merge '
-                        'result with previous scan result for same host '
-                        'and source. Useful to use multiple partial '
-                        'scan results (e.g., one with -p 80, another '
-                        'with -p 21).')
     parser.add_argument('--masscan-probes', nargs='+', metavar='PROBE',
                         help='Additional Nmap probes to use when trying to '
                         'match Masscan results against Nmap service '
@@ -87,8 +93,11 @@ def main():
         args.update_view = False
         args.no_update_view = True
         database = ivre.db.DBNmap(output_mode="normal")
+    # Ugly hack: we use a one-element list so that
+    # recursive_filelisting can modify its value
+    error = [False]
     if args.recursive:
-        scans = recursive_filelisting(args.scan)
+        scans = recursive_filelisting(args.scan, error)
     else:
         scans = args.scan
     if not args.update_view or args.no_update_view:
@@ -100,6 +109,10 @@ def main():
             )
     count = 0
     for scan in scans:
+        if not os.path.exists(scan):
+            ivre.utils.LOGGER.warning('file %r does not exist', scan)
+            error[0] = True
+            continue
         try:
             if database.store_scan(
                     scan,
@@ -112,4 +125,6 @@ def main():
         except Exception:
             ivre.utils.LOGGER.warning("Exception (file %r)", scan,
                                       exc_info=True)
-    print("%d results imported." % count)
+            error[0] = True
+    ivre.utils.LOGGER.info("%d results imported.", count)
+    sys.exit(error[0])

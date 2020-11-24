@@ -1,8 +1,7 @@
 
 
 <!DOCTYPE html>
-<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
-<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<html class="writer-html5" lang="en" >
 <head>
   <meta charset="utf-8">
   
@@ -12,28 +11,30 @@
   
 
   
+  <link rel="stylesheet" href="../_static/css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../_static/pygments.css" type="text/css" />
+  <link rel="stylesheet" href="../_static/graphviz.css" type="text/css" />
+
+  
   
   
   
 
   
-  <script type="text/javascript" src="../_static/js/modernizr.min.js"></script>
+  <!--[if lt IE 9]>
+    <script src="../_static/js/html5shiv.min.js"></script>
+  <![endif]-->
   
     
       <script type="text/javascript" id="documentation_options" data-url_root="../" src="../_static/documentation_options.js"></script>
-        <script type="text/javascript" src="../_static/jquery.js"></script>
-        <script type="text/javascript" src="../_static/underscore.js"></script>
-        <script type="text/javascript" src="../_static/doctools.js"></script>
-        <script type="text/javascript" src="../_static/language_data.js"></script>
+        <script src="../_static/jquery.js"></script>
+        <script src="../_static/underscore.js"></script>
+        <script src="../_static/doctools.js"></script>
+        <script src="../_static/language_data.js"></script>
     
     <script type="text/javascript" src="../_static/js/theme.js"></script>
 
     
-
-  
-  <link rel="stylesheet" href="../_static/css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../_static/pygments.css" type="text/css" />
-  <link rel="stylesheet" href="../_static/graphviz.css" type="text/css" />
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
     <link rel="next" title="Fast install &amp; first run" href="fast-install-and-first-run.html" />
@@ -51,7 +52,7 @@
           
 
           
-            <a href="../index.html" class="icon icon-home"> IVRE
+            <a href="../index.html" class="icon icon-home" alt="Documentation Home"> IVRE
           
 
           
@@ -64,7 +65,7 @@
             
             
               <div class="version">
-                0.9.14.dev
+                0.9.15.dev
               </div>
             
           
@@ -81,6 +82,7 @@
           
         </div>
 
+        
         <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
           
             
@@ -132,6 +134,7 @@
             
           
         </div>
+        
       </div>
     </nav>
 
@@ -170,7 +173,7 @@
 
   <ul class="wy-breadcrumbs">
     
-      <li><a href="../index.html">Docs</a> &raquo;</li>
+      <li><a href="../index.html" class="icon icon-home"></a> &raquo;</li>
         
           <li><a href="index.html">Installation</a> &raquo;</li>
         
@@ -238,14 +241,12 @@ which has the special meaning
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">DB_PASSIVE</span> <span class="o">=</span> <span class="s2">&quot;sqlite:////tmp/ivre.db&quot;</span>
 <span class="n">DB_NMAP</span> <span class="o">=</span> <span class="s2">&quot;postgresql://ivre@localhost/ivre&quot;</span>
 <span class="n">DB_VIEW</span> <span class="o">=</span> <span class="s2">&quot;elastic://192.168.0.1:9200/ivre&quot;</span>
-<span class="n">DB_FLOW</span> <span class="o">=</span> <span class="s2">&quot;neo4j://neo4j:neo4j@localhost:7474/db/data/&quot;</span>
 <span class="n">DB_DATA</span> <span class="o">=</span> <span class="s2">&quot;maxmind:///share/data/ivre/geoip&quot;</span>
 </pre></div>
 </div>
 <p>Batch insert or upsert operations can be tuned using backend-specific variables:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">LOCAL_BATCH_SIZE</span> <span class="o">=</span> <span class="mi">10000</span>      <span class="c1"># used with --local-bulk</span>
 <span class="n">MONGODB_BATCH_SIZE</span> <span class="o">=</span> <span class="mi">100</span>
-<span class="n">NEO4J_BATCH_SIZE</span> <span class="o">=</span> <span class="mi">1000</span>
 <span class="n">POSTGRES_BATCH_SIZE</span> <span class="o">=</span> <span class="mi">10000</span>
 </pre></div>
 </div>
@@ -269,11 +270,6 @@ which has the special meaning
 <code class="docutils literal notranslate"><span class="pre">&quot;/usr/share/nmap&quot;</span></code>.</p>
 <p>IVRE may need some executables:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">TESSERACT_CMD</span> <span class="o">=</span> <span class="s2">&quot;tesseract&quot;</span>
-<span class="n">GZ_CMD</span> <span class="o">=</span> <span class="s2">&quot;zcat&quot;</span>
-<span class="n">BZ2_CMD</span> <span class="o">=</span> <span class="s2">&quot;bzcat&quot;</span>
-<span class="n">MD5_CMD</span> <span class="o">=</span> <span class="s2">&quot;md5sum&quot;</span>
-<span class="n">SHA1_CMD</span> <span class="o">=</span> <span class="s2">&quot;sha1sum&quot;</span>
-<span class="n">SHA256_CMD</span> <span class="o">=</span> <span class="s2">&quot;sha256sum&quot;</span>
 <span class="n">OPENSSL_CMD</span> <span class="o">=</span> <span class="s2">&quot;openssl&quot;</span>
 </pre></div>
 </div>
@@ -572,11 +568,19 @@ in the set <code class="docutils literal notranslate"><span class="pre">DNS_BLAC
 
   <div role="contentinfo">
     <p>
+        
         &copy; Copyright 2011 - 2020, Pierre LALET
 
     </p>
   </div>
-  Built with <a href="http://sphinx-doc.org/">Sphinx</a> using a <a href="https://github.com/rtfd/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>. 
+    
+    
+    
+    Built with <a href="http://sphinx-doc.org/">Sphinx</a> using a
+    
+    <a href="https://github.com/rtfd/sphinx_rtd_theme">theme</a>
+    
+    provided by <a href="https://readthedocs.org">Read the Docs</a>. 
 
 </footer>
 
@@ -587,7 +591,6 @@ in the set <code class="docutils literal notranslate"><span class="pre">DNS_BLAC
 
   </div>
   
-
 
   <script type="text/javascript">
       jQuery(function () {

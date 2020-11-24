@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -17,11 +17,8 @@
 # You should have received a copy of the GNU General Public License
 # along with IVRE. If not, see <http://www.gnu.org/licenses/>.
 
-"""
-This module is part of IVRE.
-Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
-
-This module implement tools to look for (public) keys in the database.
+"""This module implement tools to look for (public) keys in the
+database.
 
 """
 
@@ -31,7 +28,8 @@ import re
 import subprocess
 
 
-from Crypto.PublicKey import RSA
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
 from past.builtins import long
 
 
@@ -41,6 +39,10 @@ from ivre import config, utils
 
 Key = namedtuple("key", ["ip", "port", "service", "type", "size",
                          "key", "md5"])
+
+
+def _rsa_construct(exp, mod):
+    return RSAPublicNumbers(exp, mod).public_key(default_backend())
 
 
 class DBKey(object):
@@ -80,8 +82,7 @@ class NmapKey(DBKey):
 
 
 class PassiveKey(DBKey):
-    """Base class for a key lookup tool specialized for the passive
-    (Bro) DB.
+    """Base class for a key lookup tool specialized for the passive DB.
 
     """
     def __init__(self, baseflt=None):
@@ -158,7 +159,7 @@ class SSLNmapKey(NmapKey, SSLKey):
 
 class SSLPassiveKey(PassiveKey, SSLKey):
     """Base class for the keys from SSL certificates within the passive
-    (Bro) DB.
+    DB.
 
     """
 
@@ -173,10 +174,10 @@ class SSLPassiveKey(PassiveKey, SSLKey):
 
         yield Key(record['addr'], record["port"], "ssl", certtext['type'],
                   int(certtext['len']),
-                  RSA.construct((
-                      long(self.modulus_badchars.sub(
-                          b"", certtext['modulus']), 16),
-                      long(certtext['exponent']))),
+                  _rsa_construct(long(certtext['exponent']),
+                                 long(self.modulus_badchars.sub(
+                                     b"", certtext['modulus']
+                                 ), 16)),
                   utils.decode_hex(record['infos']['md5']))
 
 
@@ -221,7 +222,7 @@ class SSHNmapKey(NmapKey, SSHKey):
 
 class SSHPassiveKey(PassiveKey, SSHKey):
     """Base class for the keys from SSH certificates within the passive
-    (Bro) DB.
+    DB.
 
     """
 
@@ -232,8 +233,8 @@ class SSHPassiveKey(PassiveKey, SSHKey):
     def getkeys(self, record):
         yield Key(record['addr'], record["port"], "ssh",
                   record['infos']['algo'][4:], record['infos']['bits'],
-                  RSA.construct((long(record['infos']['modulus']),
-                                 long(record['infos']['exponent']))),
+                  _rsa_construct(long(record['infos']['exponent']),
+                                 long(record['infos']['modulus'])),
                   utils.decode_hex(record['infos']['md5']))
 
 
@@ -260,10 +261,10 @@ class RSAKey(object):
     @classmethod
     def pem2key(cls, pem):
         certtext = cls._pem2key(pem)
-        return None if certtext is None else RSA.construct((
-            long(cls.modulus_badchars.sub(b"", certtext['modulus']), 16),
+        return None if certtext is None else _rsa_construct(
             long(certtext['exponent']),
-        ))
+            long(cls.modulus_badchars.sub(b"", certtext['modulus']), 16),
+        )
 
     @staticmethod
     def data2key(data):
@@ -271,7 +272,7 @@ class RSAKey(object):
         _, exp, mod = (next(data),  # noqa: F841 (_)
                        long(utils.encode_hex(next(data)), 16),
                        long(utils.encode_hex(next(data)), 16))
-        return RSA.construct((mod, exp))
+        return _rsa_construct(exp, mod)
 
 
 class SSLRsaNmapKey(SSLNmapKey, RSAKey):
@@ -286,12 +287,13 @@ class SSLRsaNmapKey(SSLNmapKey, RSAKey):
 
     def getkeys(self, host):
         for script in self.getscripts(host):
-            key = script["script"][self.scriptid]['pubkey']
-            yield Key(host['addr'], script["port"], "ssl", key['type'],
-                      key['bits'],
-                      RSA.construct((long(key['modulus']),
-                                     long(key['exponent']),)),
-                      utils.decode_hex(script["script"][self.scriptid]['md5']))
+            for cert in script["script"].get(self.scriptid, []):
+                key = cert['pubkey']
+                yield Key(host['addr'], script["port"], "ssl", key['type'],
+                          key['bits'],
+                          _rsa_construct(long(key['exponent']),
+                                         long(key['modulus'])),
+                          utils.decode_hex(cert['md5']))
 
 
 class SSHRsaNmapKey(SSHNmapKey, RSAKey):
@@ -306,8 +308,7 @@ class SSHRsaNmapKey(SSHNmapKey, RSAKey):
 
 
 class SSLRsaPassiveKey(SSLPassiveKey, RSAKey):
-    """Tool for the RSA Keys from SSL certificates within the passive
-    (Bro) DB.
+    """Tool for the RSA Keys from SSL certificates within the passive DB.
 
     """
 

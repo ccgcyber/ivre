@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -33,17 +33,22 @@ from ivre import VERSION
 def main():
     """Display IVRE's version"""
     print("IVRE - Network recon framework")
-    print("Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>")
+    print("Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>")
     print("Version %s" % VERSION)
     print()
     print("Python %s" % sys.version)
     print()
-    print(' '.join(str(elt) for elt in os.uname()))
+    try:
+        print(' '.join(str(elt) for elt in os.uname()))
+    except AttributeError:
+        # Windows OS don't have os.uname()
+        print(sys.platform)
     print()
     print("Dependencies:")
-    for module in ['Crypto', 'pymongo', 'py2neo', 'sqlalchemy', 'psycopg2',
-                   'krbV', 'PIL', 'MySQLdb', 'dbus', 'matplotlib', 'bottle',
-                   'OpenSSL', 'tinydb']:
+    for module in [
+            'pymongo', 'sqlalchemy', 'psycopg2', 'cryptography', 'krbV', 'PIL',
+            'MySQLdb', 'dbus', 'matplotlib', 'bottle', 'OpenSSL', 'tinydb',
+    ]:
         try:
             version = __import__(module).__version__
         except AttributeError:

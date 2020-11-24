@@ -1,5 +1,5 @@
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -21,7 +21,11 @@
 @load base/protocols/dns
 @load base/protocols/ftp
 @load base/protocols/pop3
+@load base/protocols/ntlm
+@load base/protocols/smb
+@load base/protocols/dce-rpc
 
+@load ./hassh
 @load ./ja3
 
 module PassiveRecon;
@@ -38,11 +42,14 @@ export {
         HTTP_CLIENT_HEADER,
         HTTP_SERVER_HEADER,
         HTTP_CLIENT_HEADER_SERVER,
+        HTTP_HONEYPOT_REQUEST,
         SSH_CLIENT,
         SSH_SERVER,
         SSH_CLIENT_ALGOS,
         SSH_SERVER_ALGOS,
         SSH_SERVER_HOSTKEY,
+        SSH_CLIENT_HASSH,
+        SSH_SERVER_HASSH,
         SSL_CLIENT,
         SSL_SERVER,
         DNS_ANSWER,
@@ -52,8 +59,14 @@ export {
         POP_SERVER,
         TCP_CLIENT_BANNER,
         TCP_SERVER_BANNER,
+        TCP_HONEYPOT_HIT,
+        UDP_HONEYPOT_HIT,
         OPEN_PORT,
         MAC_ADDRESS,
+        NTLM_NEGOTIATE,
+        NTLM_CHALLENGE,
+        NTLM_AUTHENTICATE,
+        SMB,
     };
 
     type Info: record {
@@ -102,6 +115,9 @@ export {
         "VIA",
         "X-GENERATOR",
         # "SET-COOKIE",
+        "WWW-AUTHENTICATE",
+        "PROXY-AUTHENTICATE",
+        "MICROSOFTSHAREPOINTTEAMSERVICES",
     };
 
     const FTP_COMMANDS: set[string] = {
@@ -129,6 +145,8 @@ export {
     # Ignore thttpd UNKNOWN timeout answer
     # Ignore SSH banners (from scripts/base/protocols/ssh/dpd.sig)
     const TCP_SERVER_BANNER_IGNORE: pattern = /^(HTTP\/[0-9]|UNKNOWN 408|[sS][sS][hH]-[12]\.)/;
+
+    option HONEYPOTS: set[addr] = {};
 }
 
 event zeek_init() {
@@ -148,7 +166,7 @@ event http_header(c: connection, is_orig: bool, name: string, value: string) {
             # While this is a header sent by the client,
             # it gives information about the server
             # if (name == "COOKIE")
-            # 	value = split1(value, /=/)[1];
+            #     value = split1(value, /=/)[1];
             Log::write(LOG, [$ts=c$start_time,
                              $uid=c$uid,
                              $host=c$id$resp_h,
@@ -227,6 +245,15 @@ event ssh_capabilities(c: connection, cookie: string, capabilities: SSH::Capabil
             $host=c$id$resp_h,
             $srvport=c$id$resp_p,
             $recon_type=SSH_SERVER_ALGOS,
+            $source="kex_algorithms",
+            $value=join_string_vec(capabilities$kex_algorithms, " ")
+        ]);
+        Log::write(LOG, [
+            $ts=c$start_time,
+            $uid=c$uid,
+            $host=c$id$resp_h,
+            $srvport=c$id$resp_p,
+            $recon_type=SSH_SERVER_ALGOS,
             $source="server_host_key_algorithms",
             $value=join_string_vec(capabilities$server_host_key_algorithms, " ")
         ]);
@@ -257,6 +284,15 @@ event ssh_capabilities(c: connection, cookie: string, capabilities: SSH::Capabil
             $source="compression_algorithms",
             $value=join_string_vec(capabilities$compression_algorithms$server_to_client, " ")
         ]);
+        if (c$ssh?$ivrehasshs) {
+            Log::write(LOG, [$ts=c$start_time,
+                             $uid=c$uid,
+                             $host=c$id$resp_h,
+                             $srvport=c$id$resp_p,
+                             $recon_type=SSH_SERVER_HASSH,
+                             $source=fmt("hassh-v%s", c$ssh$ivrehasshv),
+                             $value=c$ssh$ivrehasshs]);
+        }
     }
     else {
         Log::write(LOG, [
@@ -299,21 +335,18 @@ event ssh_capabilities(c: connection, cookie: string, capabilities: SSH::Capabil
             $source="compression_algorithms",
             $value=join_string_vec(capabilities$compression_algorithms$client_to_server, " ")
         ]);
+        if (c$ssh?$ivrehasshc) {
+            Log::write(LOG, [$ts=c$start_time,
+                             $uid=c$uid,
+                             $host=c$id$orig_h,
+                             $recon_type=SSH_CLIENT_HASSH,
+                             $source=fmt("hassh-v%s", c$ssh$ivrehasshv),
+                             $value=c$ssh$ivrehasshc]);
+        }
     }
 }
 
-event ssl_established(c: connection) {
-    if (c$ssl?$cert_chain && |c$ssl$cert_chain| > 0) {
-        Log::write(LOG, [
-            $ts=c$start_time,
-            $uid=c$uid,
-            $host=c$id$resp_h,
-            $srvport=c$id$resp_p,
-            $recon_type=SSL_SERVER,
-            $source="cert",
-            $value=encode_base64(x509_get_certificate_string(c$ssl$cert_chain[0]$x509$handle))
-        ]);
-    }
+event ssl_client_hello(c: connection, version: count, record_version: count, possible_ts: time, client_random: string, session_id: string, ciphers: index_vec, comp_methods: index_vec) {
     if (c$ssl?$ivreja3c) {
         Log::write(LOG, [$ts=c$start_time,
                          $uid=c$uid,
@@ -321,14 +354,54 @@ event ssl_established(c: connection) {
                          $recon_type=SSL_CLIENT,
                          $source="ja3",
                          $value=c$ssl$ivreja3c]);
-        if (c$ssl?$ivreja3s)
-            Log::write(LOG, [$ts=c$start_time,
-                             $uid=c$uid,
-                             $host=c$id$resp_h,
-                             $srvport=c$id$resp_p,
-                             $recon_type=SSL_SERVER,
-                             $source=fmt("ja3-%s", c$ssl$ivreja3c),
-                             $value=c$ssl$ivreja3s]);
+    }
+}
+
+event ssl_server_hello(c: connection, version: count, record_version: count, possible_ts: time, server_random: string, session_id: string, cipher: count, comp_method: count) {
+    if (c$ssl?$ivreja3s) {
+        local ja3c = "UNKNOWN";
+        if (c$ssl?$ivreja3c) {
+            ja3c = c$ssl$ivreja3c;
+        }
+        Log::write(LOG, [$ts=c$start_time,
+                         $uid=c$uid,
+                         $host=c$id$resp_h,
+                         $srvport=c$id$resp_p,
+                         $recon_type=SSL_SERVER,
+                         $source=fmt("ja3-%s", c$ssl$ivreja3c),
+                         $value=c$ssl$ivreja3s]);
+    }
+}
+
+event ssl_established(c: connection) {
+    local cacert = F;
+    if (c$ssl?$cert_chain) {
+        for (i in c$ssl$cert_chain) {
+            Log::write(LOG, [
+                $ts=c$start_time,
+                $uid=c$uid,
+                $host=c$id$resp_h,
+                $srvport=c$id$resp_p,
+                $recon_type=SSL_SERVER,
+                $source=cacert ? "cacert" : "cert",
+                $value=encode_base64(x509_get_certificate_string(c$ssl$cert_chain[i]$x509$handle))
+            ]);
+            cacert = T;
+        }
+    }
+    if (c$ssl?$client_cert_chain) {
+        cacert = F;
+        for (i in c$ssl$client_cert_chain) {
+            Log::write(LOG, [
+                $ts=c$start_time,
+                $uid=c$uid,
+                $host=c$id$orig_h,
+                $recon_type=SSL_CLIENT,
+                $source=cacert ? "cacert" : "cert",
+                $value=encode_base64(x509_get_certificate_string(c$ssl$client_cert_chain[i]$x509$handle))
+            ]);
+            cacert = T;
+        }
     }
 }
 
@@ -432,6 +505,7 @@ event tcp_contents(c: connection, is_orig: bool, seq: count, contents: string) {
                              $uid=c$uid,
                              $host=c$id$orig_h,
                              $recon_type=TCP_CLIENT_BANNER,
+                             $source=fmt("tcp/%d", c$id$resp_p),
                              $value=contents]);
         else if (c$orig$size == 0 && c$history == TCP_BANNER_HISTORY &&
              ! (TCP_SERVER_BANNER_IGNORE in contents))
@@ -475,7 +549,15 @@ event arp_reply(mac_src: string, mac_dst: string, SPA: addr, SHA: string, TPA: a
 }
 
 event connection_established(c: connection) {
-    if ("ftp-data" !in c$service && "gridftp-data" !in c$service &&
+    if (c$id$resp_h in HONEYPOTS) {
+        Log::write(LOG, [$ts=c$start_time,
+                         $uid=c$uid,
+                         $host=c$id$orig_h,
+                         $recon_type=TCP_HONEYPOT_HIT,
+                         $source="TCP",
+                         $value=fmt("tcp/%d", c$id$resp_p)]);
+    }
+    else if ("ftp-data" !in c$service && "gridftp-data" !in c$service &&
         "irc-dcc-data" !in c$service) {
         Log::write(LOG, [$ts=c$start_time,
                          $host=c$id$resp_h,
@@ -485,4 +567,196 @@ event connection_established(c: connection) {
                          $value=fmt("tcp/%d", c$id$resp_p),
                          $uid=c$uid]);
     }
+}
+
+event connection_attempt(c: connection) {
+    if (c$id$resp_h in HONEYPOTS) {
+        Log::write(LOG, [$ts=c$start_time,
+                         $uid=c$uid,
+                         $host=c$id$orig_h,
+                         $recon_type=TCP_HONEYPOT_HIT,
+                         $source="TCP",
+                         $value=fmt("tcp/%d", c$id$resp_p)]);
+    }
+}
+
+event udp_contents (u: connection, is_orig: bool, contents: string) {
+    if (is_orig && u$id$resp_h in HONEYPOTS) {
+        Log::write(LOG, [$ts=u$start_time,
+                         $uid=u$uid,
+                         $host=u$id$orig_h,
+                         $recon_type=UDP_HONEYPOT_HIT,
+                         $source=fmt("udp/%d", u$id$resp_p),
+                         $value=contents]);
+    }
+}
+
+event http_request (c: connection, method: string, original_URI: string, unescaped_URI: string, version: string) {
+    if (c$id$resp_h in HONEYPOTS) {
+        Log::write(LOG, [$ts=c$start_time,
+                         $uid=c$uid,
+                         $host=c$id$orig_h,
+                         $recon_type=HTTP_HONEYPOT_REQUEST,
+                         $source=fmt("%s-tcp/%d", method, c$id$resp_p),
+                         $value=original_URI]);
+    }
+}
+
+# Get the exact version of the protocol using NTLM
+# For now, only handles SMB
+function _get_protocol_version(c: connection): string {
+
+    if (c?$smb_state) {
+        return "Protocol:" + encode_base64(c$smb_state$current_cmd$version);
+    }
+    return "";
+}
+
+# Returns a string made from the list of protocols detected by Zeek
+function _get_source(c: connection): string {
+
+    local protocols = vector();
+    for (p in c$service) {
+        protocols += p;
+    }
+
+    return join_string_vec(sort(protocols, strcmp), "-");
+}
+
+event ntlm_challenge(c: connection, challenge: NTLM::Challenge){
+
+    # Build a string with all the host information found with NTLM
+    # (the resulting string is a list of "field:val" with values encoded in b64)
+    local value = vector(fmt("Target_Name:%s",
+                             encode_base64(challenge$target_name)));
+
+    if (challenge$target_info?$nb_domain_name) {
+        value += "NetBIOS_Domain_Name:" +
+            encode_base64(challenge$target_info$nb_domain_name);
+    }
+    if (challenge$target_info?$nb_computer_name) {
+        value += "NetBIOS_Computer_Name:" +
+            encode_base64(challenge$target_info$nb_computer_name);
+    }
+    if (challenge$target_info?$dns_domain_name) {
+        value += "DNS_Domain_Name:" +
+            encode_base64(challenge$target_info$dns_domain_name);
+    }
+    if (challenge$target_info?$dns_computer_name) {
+        value += "DNS_Computer_Name:" +
+            encode_base64(challenge$target_info$dns_computer_name);
+    }
+    if (challenge$target_info?$dns_tree_name) {
+        value += "DNS_Tree_Name:" +
+            encode_base64(challenge$target_info$dns_tree_name);
+    }
+    if (challenge?$version) {
+        value += "Product_Version:" + encode_base64(fmt("%s.%s.%s",
+                                                challenge$version$major,
+                                                challenge$version$minor,
+                                                challenge$version$build));
+        value += fmt("NTLM_Version:%d", challenge$version$ntlmssp);
+    }
+
+    local proto = _get_protocol_version(c);
+    if (proto != "") {
+        value += proto;
+    }
+
+    Log::write(LOG, [$ts=c$start_time,
+                     $uid=c$uid,
+                     $host=c$id$resp_h,
+                     $recon_type=NTLM_CHALLENGE,
+                     $source=_get_source(c),
+                     $srvport=c$id$resp_p,
+                     $value=join_string_vec(value, ",")]);
+}
+
+event ntlm_authenticate(c: connection, request: NTLM::Authenticate){
+
+    local value = vector();
+    if (request?$domain_name) {
+        value += "NetBIOS_Domain_Name:" + encode_base64(request$domain_name);
+    }
+    if (request?$user_name) {
+        value += "User_Name:" + encode_base64(request$user_name);
+    }
+    if (request?$workstation) {
+        value += "Worstation:" + encode_base64(request$workstation);
+    }
+    if (request?$version) {
+        value += "Product_Version:" + encode_base64(fmt("%s.%s.%s",
+                                                request$version$major,
+                                                request$version$minor,
+                                                request$version$build));
+        value += fmt("NTLM_Version:%d", request$version$ntlmssp);
+    }
+    local proto = _get_protocol_version(c);
+    if (proto != "") {
+        value += proto;
+    }
+
+    Log::write(LOG, [$ts=c$start_time,
+                     $uid=c$uid,
+                     $host=c$id$orig_h,
+                     $recon_type=NTLM_AUTHENTICATE,
+                     $source=_get_source(c),
+                     $value=join_string_vec(value, ",")]);
+}
+
+event smb1_session_setup_andx_request(c: connection, hdr: SMB1::Header, request: SMB1::SessionSetupAndXRequest) {
+
+    local value = vector(
+        fmt("os:%s", encode_base64(request$native_os)),
+        fmt("lanmanager:%s", encode_base64(request$native_lanman)));
+
+    if (request?$primary_domain) {
+        value += "domain:" + encode_base64(request$primary_domain);
+    }
+    if (request?$account_name) {
+        value += "account_name:" + encode_base64(request$account_name);
+    }
+    if (request?$account_password) {
+        value += "account_password:" + encode_base64(request$account_password);
+    }
+    if (request?$case_insensitive_password) {
+        value += "account_password:" +
+            encode_base64(request$case_insensitive_password);
+    }
+
+    Log::write(LOG, [$ts=c$start_time,
+                     $uid=c$uid,
+                     $host=c$id$orig_h,
+                     $recon_type=SMB,
+                     $source=_get_source(c),
+                     $value=join_string_vec(value, ",")]);
+}
+
+event smb1_session_setup_andx_response(c: connection, hdr: SMB1::Header, response: SMB1::SessionSetupAndXResponse) {
+
+    local value = vector();
+    if (response?$native_os) {
+        value += "os:" + encode_base64(response$native_os);
+    }
+    if (response?$native_lanman) {
+        value += "lanmanager:" + encode_base64(response$native_lanman);
+    }
+    if (response?$primary_domain) {
+        value += "domain:" + encode_base64(response$primary_domain);
+    }
+    if (response?$is_guest) {
+        if (response$is_guest) {
+            value += "is_guest:true";
+        }
+        else {
+            value += "is_guest:false";
+        }
+    }
+    Log::write(LOG, [$ts=c$start_time,
+                     $uid=c$uid,
+                     $host=c$id$resp_h,
+                     $srvport=c$id$resp_p,
+                     $recon_type=SMB,
+                     $source=_get_source(c),
+                     $value=join_string_vec(value, ",")]);
 }

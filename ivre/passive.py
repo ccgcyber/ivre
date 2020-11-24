@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # This file is part of IVRE.
-# Copyright 2011 - 2019 Pierre LALET <pierre.lalet@cea.fr>
+# Copyright 2011 - 2020 Pierre LALET <pierre@droids-corp.org>
 #
 # IVRE is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by
@@ -17,51 +17,25 @@
 # You should have received a copy of the GNU General Public License
 # along with IVRE. If not, see <http://www.gnu.org/licenses/>.
 
-"""
-This module is part of IVRE.
-Copyright 2011 - 2018 Pierre LALET <pierre.lalet@cea.fr>
+"""This sub-module contains functions used for passive recon.
 
-This sub-module contains functions used for passive recon.
 """
 
 
-from datetime import datetime
 import hashlib
 import re
 import struct
+import binascii
 
 
 from future.utils import viewitems
 
 
 from ivre import utils, config
+from ivre.analyzer import ntlm
 
 
-SCHEMA_VERSION = 1
-
-# p0f specific
-
-P0F_MODES = {
-    'SYN': {
-        'options': [],
-        'name': 'SYN',
-        'filter': 'tcp and tcp[tcpflags] & (tcp-syn|tcp-ack) == 2'
-    },
-    'SYN+ACK': {
-        'options': ['-A'],
-        'name': 'SYN+ACK',
-        'filter': 'tcp and tcp[tcpflags] & (tcp-syn|tcp-ack) == 18'},
-    'RST+': {
-        'options': ['-R'],
-        'name': 'RST+',
-        'filter': 'tcp and tcp[tcpflags] & (tcp-rst) == 4'},
-    'ACK': {
-        'options': ['-O'],
-        'name': 'ACK',
-        'filter': 'tcp and tcp[tcpflags] & (tcp-syn|tcp-ack) == 16'}
-}
-
-P0F_DIST = re.compile(b'distance ([0-9]+),')
+SCHEMA_VERSION = 2
 
 DNSBL_START = re.compile(
     '^(?:'
@@ -74,42 +48,7 @@ DNSBL_START = re.compile(
 )
 
 
-def parse_p0f_line(line, include_port=False, sensor=None, recontype=None):
-    line = [line.split(b' - ')[0]] + line.split(b' - ')[1].split(b' -> ')
-    if line[1].startswith(b'UNKNOWN '):
-        sig = line[1][line[1].index(b'UNKNOWN ') + 8:][1:-1].split(b':')[:6]
-        osname, version, dist = b'?', b'?', -1
-    else:
-        sig = line[1][line[1].index(b' Signature: ') + 12:][
-            1:-1].split(b':')[:6]
-        if b' (up: ' in line[1]:
-            osname = line[1][:line[1].index(b' (up: ')]
-        else:
-            osname = line[1][:line[1].index(b' Signature: ')]
-        osname = osname.split(b' ')
-        osname, version = osname[0], b' '.join(osname[1:])
-        dist = int(P0F_DIST.search(line[2]).groups()[0])
-    # We wildcard any window size which is not Sxxx or Tyyy
-    if sig[0][0] not in b'ST':
-        sig[0] = b'*'
-    spec = {
-        'schema_version': SCHEMA_VERSION,
-        'addr': line[0][line[0].index(b'> ') + 2:line[0].index(b':')].decode(),
-        'distance': dist,
-        'value': osname.decode(),
-        'version': version.decode(),
-        'signature': ':'.join(elt.decode() for elt in sig),
-    }
-    if include_port:
-        spec.update({'port': int(line[0][line[0].index(b':') + 1:])})
-    if sensor is not None:
-        spec['sensor'] = sensor
-    if recontype is not None:
-        spec['recontype'] = recontype
-    return datetime.fromtimestamp(float(line[0][1:line[0].index(b'>')])), spec
-
-
-# Bro specific
+# Zeek specific
 
 SYMANTEC_UA = re.compile('[a-zA-Z0-9/+]{32,33}AAAAA$')
 SYMANTEC_SEP_UA = re.compile(
@@ -117,7 +56,7 @@ SYMANTEC_SEP_UA = re.compile(
     '[A-F0-9]{12}\\},? SID/[0-9]+(?: SEQ/[0-9]+)?(.*)$'
 )
 KASPERSKY_UA = re.compile('AAAAA[a-zA-Z0-9_-]{1,2}AB$')
-DIGEST_AUTH_INFOS = re.compile('(username|realm|algorithm|qop)=')
+DIGEST_AUTH_INFOS = re.compile('(username|realm|algorithm|qop|domain)=')
 
 
 def _fix_mysql_banner(match):
@@ -243,10 +182,11 @@ def _prepare_rec(spec, ignorenets, neverignore):
     # try to recover the passwords, but on the other hand we store
     # specs with different challenges but the same username, realm,
     # host and sensor in the same records.
-    elif spec['recontype'] in ['HTTP_CLIENT_HEADER',
-                               'HTTP_CLIENT_HEADER_SERVER'] and \
-        spec.get('source') in ['AUTHORIZATION',
-                               'PROXY-AUTHORIZATION']:
+    elif (
+            spec['recontype'] in {'HTTP_CLIENT_HEADER',
+                                  'HTTP_CLIENT_HEADER_SERVER'} and
+            spec.get('source') in {'AUTHORIZATION', 'PROXY-AUTHORIZATION'}
+    ):
         value = spec['value']
         if value:
             authtype = value.split(None, 1)[0]
@@ -261,19 +201,48 @@ def _prepare_rec(spec, ignorenets, neverignore):
                 except Exception:
                     utils.LOGGER.warning("Cannot parse digest error for %r",
                                          spec, exc_info=True)
-            elif authtype.lower() in ['negotiate', 'kerberos', 'oauth',
-                                      'ntlm']:
+            elif ntlm._is_ntlm_message(value):
+                # NTLM_NEGOTIATE and NTLM_AUTHENTICATE
+                try:
+                    auth = utils.decode_b64(value.split(None, 1)[1].encode())
+                except (UnicodeDecodeError, TypeError, ValueError,
+                        binascii.Error):
+                    pass
+                spec['value'] = "%s %s" % \
+                    (value.split(None, 1)[0],
+                     ntlm._ntlm_dict2string(ntlm.ntlm_extract_info(auth)))
+            elif authtype.lower() in {'negotiate', 'kerberos', 'oauth'}:
                 spec['value'] = authtype
-    # p0f in Bro hack: we use the "source" field to provide the
-    # "distance" and "version" values
-    elif spec['recontype'] == 'P0F':
-        distance, version = spec.pop('source').split('-', 1)
-        try:
-            spec['distance'] = int(distance)
-        except ValueError:
-            pass
-        if version:
-            spec['version'] = version
+    elif (
+            spec['recontype'] == 'HTTP_SERVER_HEADER' and
+            spec.get('source') in {'WWW-AUTHENTICATE', 'PROXY-AUTHENTICATE'}
+    ):
+        value = spec['value']
+        if value:
+            authtype = value.split(None, 1)[0]
+            if authtype.lower() == 'digest':
+                try:
+                    # we only keep relevant info
+                    spec['value'] = '%s %s' % (authtype, ','.join(
+                        val for val in
+                        _split_digest_auth(value[6:].strip())
+                        if DIGEST_AUTH_INFOS.match(val)
+                    ))
+                except Exception:
+                    utils.LOGGER.warning("Cannot parse digest error for %r",
+                                         spec, exc_info=True)
+            elif ntlm._is_ntlm_message(value):
+                # NTLM_CHALLENGE
+                try:
+                    auth = utils.decode_b64(value.split(None, 1)[1].encode())
+                except (UnicodeDecodeError, TypeError, ValueError,
+                        binascii.Error):
+                    pass
+                spec['value'] = "%s %s" % \
+                    (value.split(None, 1)[0],
+                     ntlm._ntlm_dict2string(ntlm.ntlm_extract_info(auth)))
+            elif authtype.lower() in {'negotiate', 'kerberos', 'oauth'}:
+                spec['value'] = authtype
     # TCP server banners: try to normalize data
     elif spec['recontype'] == 'TCP_SERVER_BANNER':
         newvalue = value = utils.nmap_decode_data(spec['value'])
@@ -282,6 +251,33 @@ def _prepare_rec(spec, ignorenets, neverignore):
                 newvalue = pattern.sub(replace, newvalue)
         if newvalue != value:
             spec['value'] = utils.nmap_encode_data(newvalue)
+    elif spec['recontype'] == 'TCP_CLIENT_BANNER':
+        probe = utils.get_nmap_probes('tcp').get(
+            utils.nmap_decode_data(spec['value'])
+        )
+        if probe is not None:
+            spec.setdefault('infos', {}).update({
+                'service_name': 'scanner',
+                'service_product': 'Nmap',
+                'service_extrainfo': 'TCP probe %s' % probe,
+            })
+    elif spec['recontype'] == 'UDP_HONEYPOT_HIT':
+        data = utils.nmap_decode_data(spec['value'])
+        probe = utils.get_nmap_probes('udp').get(data)
+        if probe is not None:
+            spec.setdefault('infos', {}).update({
+                'service_name': 'scanner',
+                'service_product': 'Nmap',
+                'service_extrainfo': 'UDP probe %s' % probe,
+            })
+        else:
+            payload = utils.get_nmap_udp_payloads().get(data)
+            if payload is not None:
+                spec.setdefault('infos', {}).update({
+                    'service_name': 'scanner',
+                    'service_product': 'Nmap',
+                    'service_extrainfo': 'UDP payload %s' % payload,
+                })
     # SSL_{CLIENT,SERVER} JA3
     elif ((spec['recontype'] == 'SSL_CLIENT' and spec['source'] == 'ja3') or
           (spec['recontype'] == 'SSL_SERVER' and
@@ -296,15 +292,20 @@ def _prepare_rec(spec, ignorenets, neverignore):
                 "md5",
                 clientvalue.encode(),
             ).hexdigest()
+    # SSH_{CLIENT,SERVER}_HASSH
+    elif spec['recontype'] in ['SSH_CLIENT_HASSH', 'SSH_SERVER_HASSH']:
+        value = spec['value']
+        spec.setdefault('infos', {})['raw'] = value
+        spec['value'] = hashlib.new("md5", value.encode()).hexdigest()
     # Check DNS Blacklist answer
     elif spec['recontype'] == 'DNS_ANSWER':
-        if any(spec['value'].endswith(dnsbl)
+        if any((spec.get('value') or "").endswith(dnsbl)
                for dnsbl in config.DNS_BLACKLIST_DOMAINS):
             dnsbl_val = spec['value']
             match = DNSBL_START.search(dnsbl_val)
             if match is not None:
                 spec['recontype'] = 'DNS_BLACKLIST'
-                spec['value'] = spec['addr']
+                spec['value'] = spec.get('addr')
                 spec.update({'source': "%s-%s" %
                              (dnsbl_val[match.end():], spec['source'])})
                 addr = match.group()
@@ -348,12 +349,15 @@ def _getinfos_http_client_authorization(spec):
     """
     infos = {}
     data = spec['value'].split(None, 1)
+    value = spec['value']
     if data[1:]:
         if data[0].lower() == 'basic':
             try:
-                infos['username'], infos['password'] = utils.decode_b64(
-                    data[1].strip().encode()
-                ).decode('latin-1').split(':', 1)
+                infos['username'], infos['password'] = (
+                    utils.nmap_encode_data(v) for v in utils.decode_b64(
+                        data[1].strip().encode()
+                    ).split(b':', 1)
+                )
             except Exception:
                 pass
         elif data[0].lower() == 'digest':
@@ -367,6 +371,10 @@ def _getinfos_http_client_authorization(spec):
                         infos[key] = value[1:-1]
             except Exception:
                 pass
+        elif (value[:4].lower() == 'ntlm' and value[4:].strip()) or \
+             (value[:9].lower() == 'negotiate' and value[9:].strip()):
+            spec['value'] = spec['value'].split(None, 1)[1]
+            return _getinfos_ntlm(spec)
     res = {}
     if infos:
         res['infos'] = infos
@@ -425,10 +433,10 @@ records.
 
     """
     source = spec.get('source')
-    if source == 'cert':
+    if source in {'cert', 'cacert'}:
         return _getinfos_cert(spec)
     if source.startswith('ja3-'):
-        return _getinfos_ja3(spec)
+        return _getinfos_ja3_hassh(spec)
     return {}
 
 
@@ -451,8 +459,8 @@ def _getinfos_cert(spec):
     return res
 
 
-def _getinfos_ja3(spec):
-    """Extract hashes from JA3 fingerprint strings.
+def _getinfos_ja3_hassh(spec):
+    """Extract hashes from JA3 & HASSH fingerprint strings.
 
     """
     value = spec['infos']['raw']
@@ -474,7 +482,11 @@ def _getinfos_ja3(spec):
 
 
 def _getinfos_from_banner(banner, proto="tcp", probe="NULL"):
-    infos = utils.match_nmap_svc_fp(banner, proto=proto, probe=probe)
+    infos = utils.match_nmap_svc_fp(banner, proto=proto, probe=probe) or {}
+    try:
+        del infos['cpe']
+    except KeyError:
+        pass
     if not infos:
         return {}
     return {'infos': infos}
@@ -487,9 +499,14 @@ def _getinfos_tcp_srv_banner(spec):
     return _getinfos_from_banner(utils.nmap_decode_data(spec['value']))
 
 
-def _getinfos_ssh_server(spec):
+def _getinfos_ssh(spec):
     """Convert an SSH server banner to a TCP banner and use
-_getinfos_tcp_srv_banner()"""
+    _getinfos_tcp_srv_banner().
+
+    Since client and server banners are essentially the same thing, we
+    use this for both client and server banners.
+
+    """
     return _getinfos_from_banner(utils.nmap_decode_data(
         spec['value']
     ) + b'\r\n')
@@ -505,6 +522,82 @@ def _getinfos_ssh_hostkey(spec):
     return {'infos': info}
 
 
+def _getinfos_authentication(spec):
+    """
+    Parse value of *-AUTHENTICATE headers depending on the protocol used
+    """
+    value = spec['value']
+    if (value[:4].lower() == 'ntlm' and value[4:].strip()) or \
+       (value[:9].lower() == 'negotiate' and value[9:].strip()):
+        spec['value'] = spec['value'].split(None, 1)[1]
+        return _getinfos_ntlm(spec)
+
+    return {}
+
+
+def _getinfos_ntlm(spec):
+    """
+    Get information from NTLM_CHALLENGE and NTLM_AUTHENTICATE messages
+    """
+    info = {}
+    try:
+        for k, v in (item.split(':', 1) for item in spec['value'].split(',')):
+            if k == 'NTLM_Version':
+                try:
+                    info[k] = int(v)
+                except ValueError:
+                    utils.LOGGER.warning(
+                        "Incorrect value for field %r in record %r", k, spec
+                    )
+            else:
+                try:
+                    info[k] = utils.nmap_encode_data(utils.decode_b64(
+                        v.encode()
+                    ))
+                except (UnicodeDecodeError, TypeError, ValueError,
+                        binascii.Error):
+                    utils.LOGGER.warning(
+                        "Incorrect value for field %r in record %r", k, spec
+                    )
+    except ValueError:
+        utils.LOGGER.warning("Incorrect value in message: %r", spec)
+        return {}
+
+    return {'infos': info}
+
+
+def _getinfos_smb(spec):
+    """
+    Get information on an OS from SMB `Session Setup Request` and
+    `Session Setup Response`
+    """
+    info = {}
+    try:
+        for k, v in (item.split(':', 1) for item in spec['value'].split(',')):
+            if k == 'is_guest':
+                try:
+                    info[k] = v == 'true'
+                except ValueError:
+                    utils.LOGGER.warning(
+                        "Incorrect value for field %r in record %r", k, spec
+                    )
+            else:
+                try:
+                    info[k] = utils.nmap_encode_data(utils.decode_b64(
+                        v.encode()
+                    ))
+                except (UnicodeDecodeError, TypeError, ValueError,
+                        binascii.Error):
+                    utils.LOGGER.warning(
+                        "Incorrect value for field %r in record %r", k, spec
+                    )
+    except ValueError:
+        utils.LOGGER.warning("Incorrect value in message: %r", spec)
+        return {}
+
+    return {'infos': info}
+
+
 _GETINFOS_FUNCTIONS = {
     'HTTP_CLIENT_HEADER':
     {'AUTHORIZATION': _getinfos_http_client_authorization,
@@ -513,14 +606,23 @@ _GETINFOS_FUNCTIONS = {
     {'AUTHORIZATION': _getinfos_http_client_authorization,
      'PROXY-AUTHORIZATION': _getinfos_http_client_authorization},
     'HTTP_SERVER_HEADER':
-    {'SERVER': _getinfos_http_server},
+    {'SERVER': _getinfos_http_server,
+     'WWW-AUTHENTICATE': _getinfos_authentication,
+     'PROXY-AUTHENTICATE': _getinfos_authentication},
     'DNS_ANSWER': _getinfos_dns,
     'DNS_BLACKLIST': _getinfos_dns_blacklist,
     'SSL_SERVER': _getinfos_sslsrv,
-    'SSL_CLIENT': {'ja3': _getinfos_ja3},
+    'SSL_CLIENT': {'cacert': _getinfos_cert, 'cert': _getinfos_cert,
+                   'ja3': _getinfos_ja3_hassh},
     'TCP_SERVER_BANNER': _getinfos_tcp_srv_banner,
-    'SSH_SERVER': _getinfos_ssh_server,
+    'SSH_CLIENT': _getinfos_ssh,
+    'SSH_SERVER': _getinfos_ssh,
     'SSH_SERVER_HOSTKEY': _getinfos_ssh_hostkey,
+    'SSH_CLIENT_HASSH': _getinfos_ja3_hassh,
+    'SSH_SERVER_HASSH': _getinfos_ja3_hassh,
+    'NTLM_CHALLENGE': _getinfos_ntlm,
+    'NTLM_AUTHENTICATE': _getinfos_ntlm,
+    'SMB': _getinfos_smb,
 }
 
 
